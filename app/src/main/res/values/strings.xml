@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">Sumi Terminal</string>
+    <string name="terminal_daemon_channel_name">Sumi Terminal Session</string>
+    <string name="terminal_daemon_channel_desc">Keeps active Linux PTY sessions alive in the background</string>
+    <string name="terminal_daemon_notification_title">Sumi Terminal (墨) Active</string>
+    <string name="terminal_daemon_notification_text">Running interactive PTY session</string>
+    <string name="paste_confirm_title">Confirmar Colagem Segura</string>
+    <string name="paste_cancel">Cancelar</string>
+    <string name="paste_block">Colar como Bloco Seguro</string>
+    <string name="paste_simple">Colar</string>
+    <string name="zen_editor_ready">Pronto</string>
+    <string name="zen_editor_saved">Salvo atomicamente</string>
+    <string name="zen_editor_error">Erro ao salvar!</string>
+    <string name="zen_editor_save">Salvar</string>
+</resources>

@@ -1,0 +1,6 @@
+{
+  "name": "Sumi Terminal",
+  "description": "Wabi-Sabi Linux terminal emulator (VT100/Xterm/ANSI) with PRoot Arch Linux workspace, magnetic word selection, safe bracketed paste, and standalone Zen code editor.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
