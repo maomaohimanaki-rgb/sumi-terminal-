@@ -1,6 +1,7 @@
 package dev.sumi.terminal.terminal
 
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 data class WordSpan(
     val startCol: Int,
@@ -8,6 +9,13 @@ data class WordSpan(
     val text: String
 )
 
+/**
+ * Represents a continuous range selection on the terminal grid.
+ * Supports two distinct modes:
+ * 1. Double-Tap -> selects complete word under pointer (`selectWordAt`).
+ * 2. Long-Press & Handle Drag -> free continuous selection across characters, words, and lines
+ *    with soft non-blocking hysteresis edge snapping (< 0.42 cells from word edge).
+ */
 data class TerminalSelection(
     val startRow: Int,
     val startCol: Int,
@@ -38,12 +46,9 @@ data class TerminalSelection(
 
     companion object {
         private val WORD_DELIMITERS = setOf(
-            ' ', '\t', '|', ';', '&', '/', '(', ')', '[', ']', '{', '}', '"', '\'', ':', '=', ','
+            ' ', '\t', '|', ';', '&', '(', ')', '[', ']', '{', '}', '"', '\'', ':', '=', ','
         )
 
-        /**
-         * Extracts all word tokens on a given line for magnetic snapping.
-         */
         fun extractWords(line: String): List<WordSpan> {
             val words = mutableListOf<WordSpan>()
             var idx = 0
@@ -65,65 +70,47 @@ data class TerminalSelection(
         }
 
         /**
-         * Specification B: Hysteresis Word Magnet ("Ímã de Palavras").
-         * If the floating-point column pointer `rawColFloat` is within `magnetThresholdCells`
-         * (default 1.8 cells) of the start or end of a word on `line`, magnetically snaps the
-         * handle to the word boundary and returns `(snappedCol, didSnapToWordBoundary)`.
+         * Section 4: Soft Non-Blocking Hysteresis Magnet.
+         * - If the user's pointer `rawColFloat` is within `magnetThresholdCells` (< 1 character,
+         *   default 0.42f) of a word boundary, gently snaps to that boundary.
+         * - As soon as the user drags past that threshold, the magnet releases immediately and
+         *   follows the exact character cell `rawColFloat.roundToInt()`, NEVER locking selection
+         *   to a single word!
          */
         fun snapColumnWithWordMagnet(
             line: String,
             rawColFloat: Float,
             isStartHandle: Boolean,
-            magnetThresholdCells: Float = 1.8f
+            magnetThresholdCells: Float = 0.42f
         ): Pair<Int, Boolean> {
             val maxCol = (line.length - 1).coerceAtLeast(0)
-            val clampedRaw = rawColFloat.toInt().coerceIn(0, maxCol)
+            val exactCol = rawColFloat.roundToInt().coerceIn(0, maxCol)
             val words = extractWords(line)
-            if (words.isEmpty()) return clampedRaw to false
+            if (words.isEmpty()) return exactCol to false
 
             var bestBoundary: Int? = null
             var bestDist = Float.MAX_VALUE
 
             for (w in words) {
-                if (isStartHandle) {
-                    val distStart = abs(rawColFloat - w.startCol.toFloat())
-                    if (distStart <= magnetThresholdCells && distStart < bestDist) {
-                        bestDist = distStart
-                        bestBoundary = w.startCol
-                    }
-                } else {
-                    val distEnd = abs(rawColFloat - w.endCol.toFloat())
-                    if (distEnd <= magnetThresholdCells && distEnd < bestDist) {
-                        bestDist = distEnd
-                        bestBoundary = w.endCol
-                    }
+                val boundary = if (isStartHandle) w.startCol else w.endCol
+                val dist = abs(rawColFloat - boundary.toFloat())
+                if (dist <= magnetThresholdCells && dist < bestDist) {
+                    bestDist = dist
+                    bestBoundary = boundary
                 }
             }
 
-            if (bestBoundary != null) {
-                return bestBoundary.coerceIn(0, maxCol) to true
+            return if (bestBoundary != null) {
+                bestBoundary.coerceIn(0, maxCol) to true
+            } else {
+                // Immediately release magnet so user can select arbitrary characters, words, or lines
+                exactCol to false
             }
-
-            // Also check if touch is directly inside a word on initial selection
-            val containing = words.firstOrNull { clampedRaw in it.startCol..it.endCol }
-            if (containing != null) {
-                val distToBoundary = if (isStartHandle) {
-                    abs(rawColFloat - containing.startCol)
-                } else {
-                    abs(rawColFloat - containing.endCol)
-                }
-                if (distToBoundary <= magnetThresholdCells) {
-                    return (if (isStartHandle) containing.startCol else containing.endCol) to true
-                }
-            }
-
-            return clampedRaw to false
         }
 
         fun selectWordAt(line: String, row: Int, col: Int): TerminalSelection {
             val words = extractWords(line)
             val hit = words.firstOrNull { col in it.startCol..it.endCol }
-                ?: words.minByOrNull { minOf(abs(col - it.startCol), abs(col - it.endCol)) }
             return if (hit != null) {
                 TerminalSelection(row, hit.startCol, row, hit.endCol)
             } else {

@@ -30,12 +30,14 @@ import dev.sumi.terminal.ui.theme.Sumi
 @Composable
 fun AccessoryBar(
     mods: Mods,
+    hasSelection: Boolean,
     onToggleCtrl: () -> Unit,
     onToggleAlt: () -> Unit,
+    onToggleShift: () -> Unit,
     onKeyPress: (TermKey) -> Unit,
     onSymbolPress: (String) -> Unit,
-    onPasteFromClipboard: () -> Unit,
-    onQuickCommand: (String) -> Unit
+    onCopySelection: () -> Unit,
+    onPasteFromClipboard: () -> Unit
 ) {
     val palette = LocalWabiSabiPalette.current
 
@@ -51,53 +53,6 @@ fun AccessoryBar(
                 .background(Sumi.Hairline)
         )
 
-        // Quick Command Strip (One-tap execution for testing/workflow speed)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "EXEC ▸",
-                color = Sumi.Muted,
-                fontFamily = Sumi.Mono,
-                fontSize = 10.sp,
-                modifier = Modifier.padding(end = 2.dp)
-            )
-            val quickCommands = listOf(
-                "neofetch",
-                "ls -la",
-                "pacman -Syu",
-                "cargo run",
-                "git status",
-                "htop",
-                "cat README_SUMI.md",
-                "clear"
-            )
-            quickCommands.forEach { cmd ->
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(5.dp))
-                        .background(palette.background)
-                        .border(Sumi.HairlineWidth, Sumi.Hairline, RoundedCornerShape(5.dp))
-                        .clickable { onQuickCommand(cmd) }
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                        .testTag("quick_cmd_${cmd.substringBefore(' ')}")
-                ) {
-                    Text(
-                        text = cmd,
-                        color = palette.primaryAccent,
-                        fontFamily = Sumi.Mono,
-                        fontSize = 11.sp
-                    )
-                }
-            }
-        }
-
-        // Primary Hardware Key & Modifier Row
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -126,6 +81,11 @@ fun AccessoryBar(
                 onClick = onToggleAlt
             )
             AccessoryKeyButton(
+                label = "SHIFT",
+                isActive = mods.shift,
+                onClick = onToggleShift
+            )
+            AccessoryKeyButton(
                 label = "↑",
                 onClick = { onKeyPress(TermKey.UP) }
             )
@@ -141,6 +101,13 @@ fun AccessoryBar(
                 label = "→",
                 onClick = { onKeyPress(TermKey.RIGHT) }
             )
+            if (hasSelection) {
+                AccessoryKeyButton(
+                    label = "COPIAR",
+                    isAccent = true,
+                    onClick = onCopySelection
+                )
+            }
             AccessoryKeyButton(
                 label = "COLAR",
                 isAccent = true,
@@ -151,10 +118,14 @@ fun AccessoryBar(
                 onClick = { onKeyPress(TermKey.CTRL_C) }
             )
             AccessoryKeyButton(
+                label = "^D",
+                onClick = { onKeyPress(TermKey.CTRL_D) }
+            )
+            AccessoryKeyButton(
                 label = "^L",
                 onClick = { onKeyPress(TermKey.CTRL_L) }
             )
-            listOf("-", "/", "|", "~", "$", "*", "&", ";").forEach { sym ->
+            listOf("-", "/", "|", "~", "$", "*", "&", ";", "_").forEach { sym ->
                 AccessoryKeyButton(
                     label = sym,
                     onClick = { onSymbolPress(sym) }
@@ -167,6 +138,14 @@ fun AccessoryBar(
             AccessoryKeyButton(
                 label = "END",
                 onClick = { onKeyPress(TermKey.END) }
+            )
+            AccessoryKeyButton(
+                label = "PGUP",
+                onClick = { onKeyPress(TermKey.PGUP) }
+            )
+            AccessoryKeyButton(
+                label = "PGDN",
+                onClick = { onKeyPress(TermKey.PGDN) }
             )
         }
     }
@@ -181,7 +160,7 @@ private fun AccessoryKeyButton(
 ) {
     val palette = LocalWabiSabiPalette.current
     val bg = when {
-        isActive -> palette.primaryAccent
+        isActive -> Sumi.Kinari
         isAccent -> palette.primaryAccent.copy(alpha = 0.16f)
         else -> palette.background
     }
@@ -197,7 +176,7 @@ private fun AccessoryKeyButton(
             .background(bg)
             .border(
                 width = Sumi.HairlineWidth,
-                color = if (isActive || isAccent) palette.primaryAccent.copy(alpha = 0.6f) else Sumi.Hairline,
+                color = if (isActive) Sumi.Kinari else if (isAccent) palette.primaryAccent.copy(alpha = 0.6f) else Sumi.Hairline,
                 shape = RoundedCornerShape(6.dp)
             )
             .clickable(onClick = onClick)

@@ -22,19 +22,19 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import dev.sumi.terminal.ui.components.AccessoryBar
 import dev.sumi.terminal.ui.components.PasteConfirmDialog
-import dev.sumi.terminal.ui.components.ReleaseCenterDialog
 import dev.sumi.terminal.ui.components.TabBar
 import dev.sumi.terminal.ui.components.TerminalCanvas
 import dev.sumi.terminal.ui.components.TerminalInputConnectionView
 import dev.sumi.terminal.ui.theme.LocalWabiSabiPalette
-import java.io.File
 
 @Composable
 fun TerminalScreen(
@@ -42,6 +42,7 @@ fun TerminalScreen(
     onOpenFiles: () -> Unit
 ) {
     val context = LocalContext.current
+    val composeClipboard = LocalClipboardManager.current
     val hostView = LocalView.current
     val palette = LocalWabiSabiPalette.current
 
@@ -54,10 +55,8 @@ fun TerminalScreen(
     val pendingSafePaste by viewModel.pendingSafePaste.collectAsState()
     val showAppearance by viewModel.showAppearance.collectAsState()
 
-    var showReleaseCenter by remember { mutableStateOf(false) }
     var inputViewRef by remember { mutableStateOf<TerminalInputConnectionView?>(null) }
 
-    // Keep screen on setting
     DisposableEffect(settings.keepScreenOn) {
         hostView.keepScreenOn = settings.keepScreenOn
         onDispose { hostView.keepScreenOn = false }
@@ -67,26 +66,24 @@ fun TerminalScreen(
         sessions.firstOrNull { it.id == activeSessionId } ?: sessions.firstOrNull()
     }
 
-    fun triggerClipboardPaste() {
+    fun copyToSystemClipboard(text: String) {
+        if (text.isEmpty()) return
+        composeClipboard.setText(AnnotatedString(text))
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        cm?.setPrimaryClip(ClipData.newPlainText("Sumi Terminal", text))
+    }
+
+    fun triggerSystemClipboardPaste() {
+        val fromCompose = composeClipboard.getText()?.text
+        if (!fromCompose.isNullOrEmpty()) {
+            viewModel.onPasteRequested(fromCompose)
+            return
+        }
         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
         val clipText = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
         if (!clipText.isNullOrEmpty()) {
             viewModel.onPasteRequested(clipText)
-        } else {
-            // Demo multiline paste block if clipboard is empty so user can test Safe Paste immediately
-            viewModel.onPasteRequested(
-                "# Bloco de Manutenção Sumi Arch ARM64\n" +
-                        "uname -a\n" +
-                        "ls -la\n" +
-                        "cargo run"
-            )
         }
-    }
-
-    fun copyToClipboard(text: String) {
-        if (text.isEmpty()) return
-        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-        cm?.setPrimaryClip(ClipData.newPlainText("Sumi Terminal", text))
     }
 
     Column(
@@ -105,8 +102,7 @@ fun TerminalScreen(
             onNewTab = viewModel::createNewTab,
             onCloseTab = viewModel::closeTab,
             onOpenFiles = onOpenFiles,
-            onOpenAppearance = { viewModel.setAppearanceVisible(true) },
-            onOpenReleaseCenter = { showReleaseCenter = true }
+            onOpenAppearance = { viewModel.setAppearanceVisible(true) }
         )
 
         Box(
@@ -114,7 +110,7 @@ fun TerminalScreen(
                 .weight(1f)
                 .fillMaxWidth()
         ) {
-            // Invisible native View with custom BaseInputConnection preserving Gboard clipboard bar
+            // Invisible native View with custom BaseInputConnection preserving Gboard/Samsung clipboard bar
             AndroidView(
                 factory = { ctx ->
                     TerminalInputConnectionView(
@@ -143,8 +139,9 @@ fun TerminalScreen(
                     settings = settings,
                     selection = selection,
                     onSelectionChange = viewModel::updateSelection,
-                    onCopySelection = ::copyToClipboard,
-                    onRequestPaste = ::triggerClipboardPaste,
+                    onSelectAll = viewModel::selectAll,
+                    onCopySelection = ::copyToSystemClipboard,
+                    onRequestPaste = ::triggerSystemClipboardPaste,
                     onRequestKeyboard = { inputViewRef?.openKeyboard() },
                     modifier = Modifier.fillMaxSize()
                 )
@@ -153,12 +150,22 @@ fun TerminalScreen(
 
         AccessoryBar(
             mods = mods,
+            hasSelection = selection != null,
             onToggleCtrl = viewModel::toggleCtrl,
             onToggleAlt = viewModel::toggleAlt,
-            onKeyPress = viewModel::sendKey,
-            onSymbolPress = viewModel::sendRawText,
-            onPasteFromClipboard = ::triggerClipboardPaste,
-            onQuickCommand = viewModel::runQuickCommand
+            onToggleShift = viewModel::toggleShift,
+            onKeyPress = { key ->
+                inputViewRef?.resetImeState()
+                viewModel.sendKey(key)
+            },
+            onSymbolPress = { symbol ->
+                inputViewRef?.resetImeState()
+                viewModel.sendRawText(symbol)
+            },
+            onCopySelection = {
+                viewModel.extractCurrentSelection()?.let(::copyToSystemClipboard)
+            },
+            onPasteFromClipboard = ::triggerSystemClipboardPaste
         )
     }
 
@@ -167,19 +174,6 @@ fun TerminalScreen(
             text = pasteText,
             onConfirm = viewModel::confirmSafePaste,
             onDismiss = viewModel::dismissSafePaste
-        )
-    }
-
-    if (showReleaseCenter) {
-        val homeDir = remember(context) {
-            File(context.filesDir, "arch-arm64-rootfs/home/sumi").apply { mkdirs() }
-        }
-        ReleaseCenterDialog(
-            workspaceHomeDir = homeDir,
-            onDismiss = { showReleaseCenter = false },
-            onRunReleaseCheckInTerminal = {
-                viewModel.runQuickCommand("ls -la ~/release 2>/dev/null || ls -la")
-            }
         )
     }
 

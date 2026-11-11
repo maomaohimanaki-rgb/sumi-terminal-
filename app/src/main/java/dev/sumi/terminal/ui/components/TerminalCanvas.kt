@@ -11,6 +11,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -19,14 +20,15 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,7 +36,6 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -64,7 +65,13 @@ import dev.sumi.terminal.ui.theme.LocalWabiSabiPalette
 import dev.sumi.terminal.ui.theme.Sumi
 import java.io.File
 import kotlin.math.floor
+import kotlin.math.hypot
+import kotlin.math.min
 import kotlin.math.roundToInt
+
+private enum class DraggedHandle {
+    NONE, START, END
+}
 
 @Composable
 fun TerminalCanvas(
@@ -72,6 +79,7 @@ fun TerminalCanvas(
     settings: TerminalSettings,
     selection: TerminalSelection?,
     onSelectionChange: (TerminalSelection?) -> Unit,
+    onSelectAll: () -> Unit,
     onCopySelection: (String) -> Unit,
     onRequestPaste: () -> Unit,
     onRequestKeyboard: () -> Unit,
@@ -84,6 +92,10 @@ fun TerminalCanvas(
 
     val renderTick by session.renderTick.collectAsState()
 
+    // Always keep live references so pointerInput coroutines never read stale selection state
+    val currentSelection by rememberUpdatedState(selection)
+    val currentOnSelectionChange by rememberUpdatedState(onSelectionChange)
+
     val baseTextStyle = remember(settings.fontSizeSp, palette.foreground) {
         TextStyle(
             fontFamily = Sumi.Mono,
@@ -92,7 +104,6 @@ fun TerminalCanvas(
         )
     }
 
-    // Measure single character cell geometry
     val charMetrics = remember(baseTextStyle) {
         val layout = textMeasurer.measure(AnnotatedString("M"), style = baseTextStyle)
         val w = layout.size.width.toFloat().coerceAtLeast(8f)
@@ -103,8 +114,8 @@ fun TerminalCanvas(
     val cellHeightPx = charMetrics.second
     val padHorizontalPx = with(density) { 10.dp.toPx() }
     val padVerticalPx = with(density) { 8.dp.toPx() }
+    val handleDropOffsetPx = with(density) { 6.dp.toPx() }
 
-    // Smooth breathing cursor animation (6.2: Indicador de cursor respirando suavemente sem piscar agressivo)
     val infiniteTransition = rememberInfiniteTransition(label = "cursorBreath")
     val cursorAlpha by infiniteTransition.animateFloat(
         initialValue = 0.30f,
@@ -116,9 +127,13 @@ fun TerminalCanvas(
         label = "cursorBreathAlpha"
     )
 
-    // Track last snapped word boundary to fire HapticFeedbackType.TextHandleMove only on new snap
-    var lastSnappedCol by remember { mutableStateOf(-1) }
-    var lastSnappedRow by remember { mutableStateOf(-1) }
+    var lastSnappedCol by remember { mutableIntStateOf(-1) }
+    var lastSnappedRow by remember { mutableIntStateOf(-1) }
+    var activeHandle by remember { mutableStateOf(DraggedHandle.NONE) }
+    var fixedAnchorRow by remember { mutableIntStateOf(0) }
+    var fixedAnchorCol by remember { mutableIntStateOf(0) }
+    var longPressOriginRow by remember { mutableIntStateOf(0) }
+    var longPressOriginCol by remember { mutableIntStateOf(0) }
 
     val snapshot = remember(renderTick, palette, settings.autoCommandColors) {
         session.buffer.snapshotScreen(
@@ -129,6 +144,8 @@ fun TerminalCanvas(
     val lines = snapshot.first
     val cursorRow = snapshot.second.first
     val cursorCol = snapshot.second.second
+
+    val hasActiveSelection = selection != null
 
     Box(
         modifier = modifier
@@ -143,11 +160,12 @@ fun TerminalCanvas(
                     session.requestResizeDebounced(newRows, newCols)
                 }
             }
-            .pointerInput(cellWidthPx, cellHeightPx) {
+            // 1. Tap & Double-Tap Mode: Double-tap selects complete word immediately
+            .pointerInput(cellWidthPx, cellHeightPx, settings.hapticFeedback) {
                 detectTapGestures(
                     onTap = {
-                        if (selection != null) {
-                            onSelectionChange(null)
+                        if (currentSelection != null) {
+                            currentOnSelectionChange(null)
                         } else {
                             onRequestKeyboard()
                         }
@@ -162,29 +180,61 @@ fun TerminalCanvas(
                         if (settings.hapticFeedback) {
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         }
-                        onSelectionChange(wordSel)
+                        currentOnSelectionChange(wordSel)
                     }
                 )
             }
-            .pointerInput(cellWidthPx, cellHeightPx, settings.hapticFeedback) {
-                detectDragGesturesAfterLongPress(
-                    onDragStart = { startOffset ->
-                        val row = ((startOffset.y - padVerticalPx) / cellHeightPx).toInt()
-                            .coerceIn(0, session.buffer.rows - 1)
-                        val col = ((startOffset.x - padHorizontalPx) / cellWidthPx).toInt()
-                            .coerceIn(0, session.buffer.cols - 1)
-                        val lineStr = session.buffer.getLineString(row)
-                        val wordSel = TerminalSelection.selectWordAt(lineStr, row, col)
-                        lastSnappedRow = row
-                        lastSnappedCol = wordSel.endCol
-                        if (settings.hapticFeedback) {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+            // 2. Direct Handle Dragging when a selection is active: both LEFT (Start) and RIGHT (End) handles move freely
+            .pointerInput(cellWidthPx, cellHeightPx, hasActiveSelection, settings.hapticFeedback) {
+                if (!hasActiveSelection) return@pointerInput
+                detectDragGestures(
+                    onDragStart = { touch ->
+                        val liveSel = currentSelection ?: return@detectDragGestures
+                        val norm = liveSel.normalized()
+
+                        val startHandleDrop = Offset(
+                            x = padHorizontalPx + norm.startCol * cellWidthPx,
+                            y = padVerticalPx + (norm.startRow + 1) * cellHeightPx + handleDropOffsetPx
+                        )
+                        val startCellCenter = Offset(
+                            x = padHorizontalPx + (norm.startCol + 0.5f) * cellWidthPx,
+                            y = padVerticalPx + (norm.startRow + 0.5f) * cellHeightPx
+                        )
+                        val endHandleDrop = Offset(
+                            x = padHorizontalPx + (norm.endCol + 1) * cellWidthPx,
+                            y = padVerticalPx + (norm.endRow + 1) * cellHeightPx + handleDropOffsetPx
+                        )
+                        val endCellCenter = Offset(
+                            x = padHorizontalPx + (norm.endCol + 0.5f) * cellWidthPx,
+                            y = padVerticalPx + (norm.endRow + 0.5f) * cellHeightPx
+                        )
+
+                        val distStart = min(
+                            hypot(touch.x - startHandleDrop.x, touch.y - startHandleDrop.y),
+                            hypot(touch.x - startCellCenter.x, touch.y - startCellCenter.y)
+                        )
+                        val distEnd = min(
+                            hypot(touch.x - endHandleDrop.x, touch.y - endHandleDrop.y),
+                            hypot(touch.x - endCellCenter.x, touch.y - endCellCenter.y)
+                        )
+
+                        if (distStart <= distEnd) {
+                            activeHandle = DraggedHandle.START
+                            fixedAnchorRow = norm.endRow
+                            fixedAnchorCol = norm.endCol
+                            lastSnappedRow = norm.startRow
+                            lastSnappedCol = norm.startCol
+                        } else {
+                            activeHandle = DraggedHandle.END
+                            fixedAnchorRow = norm.startRow
+                            fixedAnchorCol = norm.startCol
+                            lastSnappedRow = norm.endRow
+                            lastSnappedCol = norm.endCol
                         }
-                        onSelectionChange(wordSel)
                     },
                     onDrag = { change, _ ->
+                        if (activeHandle == DraggedHandle.NONE) return@detectDragGestures
                         change.consume()
-                        val curSel = selection ?: return@detectDragGesturesAfterLongPress
                         val pos = change.position
                         val row = ((pos.y - padVerticalPx) / cellHeightPx).toInt()
                             .coerceIn(0, session.buffer.rows - 1)
@@ -192,14 +242,12 @@ fun TerminalCanvas(
                             .coerceIn(0f, (session.buffer.cols - 1).toFloat())
                         val lineStr = session.buffer.getLineString(row)
 
-                        // Specification B: Hysteresis Word Magnet (1.8 cell radius attraction)
-                        val isDraggingBeforeAnchor = row < curSel.startRow ||
-                                (row == curSel.startRow && rawColFloat < curSel.startCol)
+                        val isStart = activeHandle == DraggedHandle.START
                         val (snappedCol, didSnap) = TerminalSelection.snapColumnWithWordMagnet(
                             line = lineStr,
                             rawColFloat = rawColFloat,
-                            isStartHandle = isDraggingBeforeAnchor,
-                            magnetThresholdCells = 1.8f
+                            isStartHandle = isStart,
+                            magnetThresholdCells = 0.42f
                         )
 
                         if (didSnap && (snappedCol != lastSnappedCol || row != lastSnappedRow)) {
@@ -210,8 +258,78 @@ fun TerminalCanvas(
                             }
                         }
 
-                        onSelectionChange(
-                            curSel.copy(
+                        val updated = if (isStart) {
+                            TerminalSelection(
+                                startRow = row,
+                                startCol = snappedCol,
+                                endRow = fixedAnchorRow,
+                                endCol = fixedAnchorCol
+                            )
+                        } else {
+                            TerminalSelection(
+                                startRow = fixedAnchorRow,
+                                startCol = fixedAnchorCol,
+                                endRow = row,
+                                endCol = snappedCol
+                            )
+                        }
+                        currentOnSelectionChange(updated)
+                    },
+                    onDragEnd = { activeHandle = DraggedHandle.NONE },
+                    onDragCancel = { activeHandle = DraggedHandle.NONE }
+                )
+            }
+            // 3. Long-Press & Continuous Drag: starts at touched cell and expands freely across words & lines
+            .pointerInput(cellWidthPx, cellHeightPx, settings.hapticFeedback) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = { startOffset ->
+                        val row = ((startOffset.y - padVerticalPx) / cellHeightPx).toInt()
+                            .coerceIn(0, session.buffer.rows - 1)
+                        val col = ((startOffset.x - padHorizontalPx) / cellWidthPx).toInt()
+                            .coerceIn(0, session.buffer.cols - 1)
+                        longPressOriginRow = row
+                        longPressOriginCol = col
+                        lastSnappedRow = row
+                        lastSnappedCol = col
+                        if (settings.hapticFeedback) {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        }
+                        val lineStr = session.buffer.getLineString(row)
+                        val initialSel = TerminalSelection.selectWordAt(lineStr, row, col)
+                        longPressOriginRow = initialSel.startRow
+                        longPressOriginCol = initialSel.startCol
+                        currentOnSelectionChange(initialSel)
+                    },
+                    onDrag = { change, _ ->
+                        change.consume()
+                        val pos = change.position
+                        val row = ((pos.y - padVerticalPx) / cellHeightPx).toInt()
+                            .coerceIn(0, session.buffer.rows - 1)
+                        val rawColFloat = ((pos.x - padHorizontalPx) / cellWidthPx)
+                            .coerceIn(0f, (session.buffer.cols - 1).toFloat())
+                        val lineStr = session.buffer.getLineString(row)
+
+                        val isDraggingBackwards = row < longPressOriginRow ||
+                                (row == longPressOriginRow && rawColFloat < longPressOriginCol)
+                        val (snappedCol, didSnap) = TerminalSelection.snapColumnWithWordMagnet(
+                            line = lineStr,
+                            rawColFloat = rawColFloat,
+                            isStartHandle = isDraggingBackwards,
+                            magnetThresholdCells = 0.42f
+                        )
+
+                        if (didSnap && (snappedCol != lastSnappedCol || row != lastSnappedRow)) {
+                            lastSnappedCol = snappedCol
+                            lastSnappedRow = row
+                            if (settings.hapticFeedback) {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            }
+                        }
+
+                        currentOnSelectionChange(
+                            TerminalSelection(
+                                startRow = longPressOriginRow,
+                                startCol = longPressOriginCol,
                                 endRow = row,
                                 endCol = snappedCol
                             )
@@ -221,7 +339,6 @@ fun TerminalCanvas(
             }
             .testTag("terminal_canvas")
     ) {
-        // Optional Wabi-Sabi Sumi-e background art or custom sandbox image
         val bgPath = settings.customBackgroundPath
         if (bgPath == "SUMI_ART") {
             Image(
@@ -246,11 +363,10 @@ fun TerminalCanvas(
             }
         }
 
-        // Core VT100/Xterm Grid & Breathing Cursor Canvas
         Canvas(modifier = Modifier.fillMaxSize()) {
             val normSel = selection?.normalized()
 
-            // 1. Draw Selection Highlight & Magnetic Handles
+            // 1. Draw Selection Highlight
             if (normSel != null) {
                 for (r in normSel.startRow..normSel.endRow.coerceAtMost(lines.lastIndex)) {
                     if (r < 0) continue
@@ -276,7 +392,6 @@ fun TerminalCanvas(
             lines.forEachIndexed { rowIdx, rowCells ->
                 val yOffset = padVerticalPx + rowIdx * cellHeightPx
 
-                // Draw explicit cell background colors (e.g., neofetch color blocks)
                 rowCells.forEachIndexed { colIdx, cell ->
                     cell.bgColor?.let { bg ->
                         drawRect(
@@ -290,7 +405,6 @@ fun TerminalCanvas(
                     }
                 }
 
-                // Check if row has non-space characters
                 var lastNonEmpty = -1
                 for (i in rowCells.indices.reversed()) {
                     if (rowCells[i].char != ' ') {
@@ -325,7 +439,7 @@ fun TerminalCanvas(
                 }
             }
 
-            // 3. Draw Breathing Cursor (Block, Beam, or Underline)
+            // 3. Draw Breathing Cursor
             val cursorX = padHorizontalPx + cursorCol * cellWidthPx
             val cursorY = padVerticalPx + cursorRow * cellHeightPx
             val cColor = palette.cursorColor.copy(alpha = cursorAlpha)
@@ -354,27 +468,45 @@ fun TerminalCanvas(
                 }
             }
 
-            // 4. Draw Magnetic Selection Handles (Kinari gold anchors)
+            // 4. Draw Selection Handles (Start & End Kinari stems + droplets)
             if (normSel != null) {
                 val startHandleX = padHorizontalPx + normSel.startCol * cellWidthPx
-                val startHandleY = padVerticalPx + (normSel.startRow + 1) * cellHeightPx
-                val endHandleX = padHorizontalPx + (normSel.endCol + 1) * cellWidthPx
-                val endHandleY = padVerticalPx + (normSel.endRow + 1) * cellHeightPx
+                val startTopY = padVerticalPx + normSel.startRow * cellHeightPx
+                val startBottomY = padVerticalPx + (normSel.startRow + 1) * cellHeightPx
 
-                drawCircle(
+                val endHandleX = padHorizontalPx + (normSel.endCol + 1) * cellWidthPx
+                val endTopY = padVerticalPx + normSel.endRow * cellHeightPx
+                val endBottomY = padVerticalPx + (normSel.endRow + 1) * cellHeightPx
+
+                // Start vertical bar + droplet
+                drawLine(
                     color = Sumi.Kinari,
-                    radius = 5.dp.toPx(),
-                    center = Offset(startHandleX, startHandleY + 4.dp.toPx())
+                    start = Offset(startHandleX, startTopY),
+                    end = Offset(startHandleX, startBottomY + 5.dp.toPx()),
+                    strokeWidth = 2.dp.toPx()
                 )
                 drawCircle(
                     color = Sumi.Kinari,
-                    radius = 5.dp.toPx(),
-                    center = Offset(endHandleX, endHandleY + 4.dp.toPx())
+                    radius = 7.dp.toPx(),
+                    center = Offset(startHandleX, startBottomY + 6.dp.toPx())
+                )
+
+                // End vertical bar + droplet
+                drawLine(
+                    color = Sumi.Kinari,
+                    start = Offset(endHandleX, endTopY),
+                    end = Offset(endHandleX, endBottomY + 5.dp.toPx()),
+                    strokeWidth = 2.dp.toPx()
+                )
+                drawCircle(
+                    color = Sumi.Kinari,
+                    radius = 7.dp.toPx(),
+                    center = Offset(endHandleX, endBottomY + 6.dp.toPx())
                 )
             }
         }
 
-        // Floating Action Pill when Word Magnet selection is active
+        // Clean minimalist Selection Action Bar: Copiar | Selecionar tudo | Colar | ✕
         if (selection != null) {
             val norm = selection.normalized()
             val pillOffsetY = ((padVerticalPx + (norm.startRow - 1).coerceAtLeast(0) * cellHeightPx)
@@ -384,48 +516,60 @@ fun TerminalCanvas(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .offset { IntOffset(0, pillOffsetY) }
-                    .clip(RoundedCornerShape(20.dp))
+                    .clip(RoundedCornerShape(18.dp))
                     .background(Sumi.Sumi2)
-                    .border(1.dp, Sumi.Kinari.copy(alpha = 0.65f), RoundedCornerShape(20.dp))
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
-                    .testTag("word_magnet_selection_toolbar"),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    .border(1.dp, Sumi.Kinari.copy(alpha = 0.65f), RoundedCornerShape(18.dp))
+                    .padding(horizontal = 14.dp, vertical = 7.dp)
+                    .testTag("selection_action_toolbar"),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "ÍMÃ DE PALAVRAS",
-                    color = Sumi.Muted,
-                    fontFamily = Sumi.Mono,
-                    fontSize = 10.sp
-                )
                 Text(
                     text = "Copiar",
                     color = Sumi.Kinari,
                     fontFamily = Sumi.Mono,
                     fontWeight = FontWeight.Bold,
                     fontSize = 12.sp,
-                    modifier = Modifier.clickable {
-                        val txt = session.buffer.extractSelectedText(selection)
-                        onCopySelection(txt)
-                        onSelectionChange(null)
-                    }
+                    modifier = Modifier
+                        .clickable {
+                            val txt = session.buffer.extract(selection)
+                            onCopySelection(txt)
+                            onSelectionChange(null)
+                        }
+                        .testTag("selection_copy_button")
+                )
+                Text(
+                    text = "Selecionar tudo",
+                    color = Sumi.Shironeri,
+                    fontFamily = Sumi.Mono,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 12.sp,
+                    modifier = Modifier
+                        .clickable {
+                            onSelectAll()
+                        }
+                        .testTag("selection_select_all_button")
                 )
                 Text(
                     text = "Colar",
                     color = Sumi.Shironeri,
                     fontFamily = Sumi.Mono,
                     fontSize = 12.sp,
-                    modifier = Modifier.clickable {
-                        onSelectionChange(null)
-                        onRequestPaste()
-                    }
+                    modifier = Modifier
+                        .clickable {
+                            onSelectionChange(null)
+                            onRequestPaste()
+                        }
+                        .testTag("selection_paste_button")
                 )
                 Text(
                     text = "✕",
                     color = Sumi.Muted,
                     fontFamily = Sumi.Mono,
                     fontSize = 12.sp,
-                    modifier = Modifier.clickable { onSelectionChange(null) }
+                    modifier = Modifier
+                        .clickable { onSelectionChange(null) }
+                        .testTag("selection_clear_button")
                 )
             }
         }

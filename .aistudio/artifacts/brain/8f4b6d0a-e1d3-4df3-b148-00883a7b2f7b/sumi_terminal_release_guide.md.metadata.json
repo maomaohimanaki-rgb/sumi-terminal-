@@ -1,5 +1,5 @@
 {
-  "summary":  "Guia completo de arquitetura, assinatura KeyStore RSA 4096-bit e artefatos de Release do Sumi Terminal (墨) v2.0-zen.",
-  "updatedAt":  "2026-11-11T00:36:00.679000096Z",
+  "summary":  "Guia de download e resumo técnico da causa raiz do prompt root@arch:~# e da integração do PTY nativo libtermux.so no Sumi Terminal v2.0-zen.",
+  "updatedAt":  "2026-11-11T03:18:27.103675804Z",
   "userFacing":  true
 }

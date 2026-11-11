@@ -15,13 +15,19 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import java.io.File
+
+data class LaunchConfig(
+    val cmd: String,
+    val args: Array<String>,
+    val env: Array<String>,
+    val cwd: String
+)
 
 class TerminalSession(
     val id: String,
     val index: Int,
     initialTitle: String,
-    private val workingDir: File,
+    private val launchConfig: LaunchConfig,
     private val performanceManager: PerformanceManager,
     private val paletteProvider: () -> WabiSabiPalette = { SumiPalettes.Carvao }
 ) : PtyListener {
@@ -42,27 +48,26 @@ class TerminalSession(
     val renderTick: StateFlow<Long> = _renderTick.asStateFlow()
 
     private var nativeHandle: Long = 0L
+    private var readerTid: Int = 0
     private var resizeDebounceJob: Job? = null
+    private var lastFrameEmitMs: Long = 0L
 
     fun start() {
         if (nativeHandle != 0L) return
-        val cmd = "/system/bin/sh"
-        val args = arrayOf("sh", "-i")
-        val env = arrayOf(
-            "TERM=xterm-256color",
-            "COLORTERM=truecolor",
-            "HOME=${workingDir.absolutePath}",
-            "LANG=en_US.UTF-8"
-        )
         nativeHandle = PtyNative.startSession(
-            cmd = cmd,
-            args = args,
-            env = env,
-            cwd = workingDir.absolutePath,
+            cmd = launchConfig.cmd,
+            args = launchConfig.args,
+            env = launchConfig.env,
+            cwd = launchConfig.cwd,
             rows = buffer.rows,
             cols = buffer.cols,
             listener = this
         )
+        val tid = PtyNative.readerTid(nativeHandle)
+        if (tid > 0) {
+            readerTid = tid
+            performanceManager.attachReaderThread(tid)
+        }
     }
 
     fun write(bytes: ByteArray) {
@@ -71,8 +76,8 @@ class TerminalSession(
     }
 
     /**
-     * BugFix #3: Debounces TIOCSWINSZ resize events during keyboard open/close animations
-     * (120ms settle window) so bash Readline never corrupts multiline cursor matrices.
+     * Debounces TIOCSWINSZ resize events during keyboard animations (120ms settle window)
+     * so bash Readline never corrupts multiline cursor matrices.
      */
     fun requestResizeDebounced(rows: Int, cols: Int) {
         val clampedRows = rows.coerceIn(6, 200)
@@ -90,12 +95,12 @@ class TerminalSession(
         }
     }
 
-    fun rename(newTitle: String) {
-        _title.value = newTitle
-    }
-
     fun close() {
         resizeDebounceJob?.cancel()
+        if (readerTid > 0) {
+            performanceManager.detachReaderThread(readerTid)
+            readerTid = 0
+        }
         if (nativeHandle != 0L) {
             PtyNative.killSession(nativeHandle, 15) // SIGTERM
             nativeHandle = 0L
@@ -104,19 +109,39 @@ class TerminalSession(
     }
 
     override fun onOutput(data: ByteArray) {
+        val startNs = System.nanoTime()
         buffer.appendBytes(data, paletteProvider())
-        _renderTick.value = System.nanoTime()
+        val durationNs = System.nanoTime() - startNs
+        performanceManager.reportWorkDuration(durationNs)
+
+        // Respect ADPF thermal frame interval throttling (16ms / 33ms / 50ms / 100ms / 250ms)
+        val nowMs = System.currentTimeMillis()
+        val minIntervalMs = performanceManager.frameIntervalMs.value
+        if (nowMs - lastFrameEmitMs >= minIntervalMs) {
+            lastFrameEmitMs = nowMs
+            _renderTick.value = System.nanoTime()
+        } else {
+            scope.launch {
+                delay(minIntervalMs)
+                _renderTick.value = System.nanoTime()
+            }
+        }
     }
 
     override fun onExit(code: Int) {
+        if (readerTid > 0) {
+            performanceManager.detachReaderThread(readerTid)
+            readerTid = 0
+        }
         _isAlive.value = false
         _exitCode.value = code
-        val exitBanner = "\r\n\u001B[38;2;140;136;129m[Processo encerrado com código $code]\u001B[0m\r\n"
+        val exitBanner = "\r\n\u001B[38;2;140;136;129m[Processo encerrado (código $code)]\u001B[0m\r\n"
         buffer.appendBytes(exitBanner.toByteArray(Charsets.UTF_8), paletteProvider())
         _renderTick.value = System.nanoTime()
     }
 
     override fun onReaderStarted(tid: Int) {
-        performanceManager.boostReaderThread(tid)
+        readerTid = tid
+        performanceManager.attachReaderThread(tid)
     }
 }

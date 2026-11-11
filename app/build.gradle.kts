@@ -63,6 +63,11 @@ android {
     compose = true
     buildConfig = true
   }
+  packaging {
+    jniLibs {
+      useLegacyPackaging = true
+    }
+  }
   testOptions { unitTests { isIncludeAndroidResources = true } }
   dependenciesInfo {
     includeInApk = false
@@ -106,6 +111,7 @@ dependencies {
   // implementation(libs.androidx.room.ktx)
   // implementation(libs.androidx.room.runtime)
   implementation(libs.coil.compose)
+  implementation(libs.commons.compress)
   // implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)
   // Uncomment to use Firestore:
@@ -123,7 +129,7 @@ dependencies {
   implementation(libs.kotlinx.coroutines.core)
   // implementation(libs.logging.interceptor)
   // implementation(libs.moshi.kotlin)
-  // implementation(libs.okhttp)
+  implementation(libs.okhttp)
   // implementation(libs.play.services.location)
   // implementation(libs.retrofit)
   testImplementation(libs.androidx.compose.ui.test.junit4)

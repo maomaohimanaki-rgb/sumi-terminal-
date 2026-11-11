@@ -24,7 +24,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Palette
-import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -57,8 +56,7 @@ fun TabBar(
     onNewTab: () -> Unit,
     onCloseTab: (String) -> Unit,
     onOpenFiles: () -> Unit,
-    onOpenAppearance: () -> Unit,
-    onOpenReleaseCenter: () -> Unit = {}
+    onOpenAppearance: () -> Unit
 ) {
     val palette = LocalWabiSabiPalette.current
     var pendingCloseSession by remember { mutableStateOf<TerminalSession?>(null) }
@@ -169,7 +167,7 @@ fun TabBar(
                                 .width(24.dp)
                                 .height(2.dp)
                                 .background(
-                                    if (isActive) palette.primaryAccent else androidx.compose.ui.graphics.Color.Transparent,
+                                    if (isActive) Sumi.Paper else androidx.compose.ui.graphics.Color.Transparent,
                                     RoundedCornerShape(1.dp)
                                 )
                         )
@@ -189,26 +187,6 @@ fun TabBar(
                 )
             }
 
-            // Direct APK & KeyStore Download Center button
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(palette.primaryAccent.copy(alpha = 0.18f))
-                    .border(1.dp, palette.primaryAccent.copy(alpha = 0.7f), RoundedCornerShape(6.dp))
-                    .clickable(onClick = onOpenReleaseCenter)
-                    .padding(horizontal = 8.dp, vertical = 5.dp)
-                    .testTag("open_apk_download_button"),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "⬇ APK",
-                    color = palette.primaryAccent,
-                    fontFamily = Sumi.Mono,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 11.sp
-                )
-            }
-
             // Workspace File Manager & Zen Editor button
             IconButton(
                 onClick = onOpenFiles,
@@ -216,7 +194,7 @@ fun TabBar(
             ) {
                 Icon(
                     imageVector = Icons.Outlined.FolderOpen,
-                    contentDescription = "Arquivos e Editor Zen",
+                    contentDescription = "Gerenciador de Arquivos",
                     tint = Sumi.Shironeri
                 )
             }

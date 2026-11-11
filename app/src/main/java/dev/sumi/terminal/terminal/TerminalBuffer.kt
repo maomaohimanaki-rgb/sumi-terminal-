@@ -68,7 +68,7 @@ class TerminalBuffer(
         private set
 
     private enum class ParserState {
-        NORMAL, ESCAPE, CSI, OSC
+        NORMAL, ESCAPE, CSI, OSC, OSC_ESC
     }
 
     fun appendBytes(bytes: ByteArray, palette: WabiSabiPalette): Unit = lock.withLock {
@@ -85,7 +85,10 @@ class TerminalBuffer(
                 when (ch) {
                     AnsiConstants.ESC -> parserState = ParserState.ESCAPE
                     AnsiConstants.CR -> curCol = 0
-                    AnsiConstants.LF -> lineFeed()
+                    AnsiConstants.LF -> {
+                        curCol = 0
+                        lineFeed()
+                    }
                     AnsiConstants.BS, AnsiConstants.DEL -> handleBackspace()
                     AnsiConstants.TAB -> {
                         val nextStop = ((curCol / 4) + 1) * 4
@@ -127,11 +130,21 @@ class TerminalBuffer(
                 }
             }
             ParserState.OSC -> {
-                if (ch == AnsiConstants.BEL || ch == '\n') {
-                    parserState = ParserState.NORMAL
-                } else {
-                    csiBuffer.append(ch)
+                when {
+                    ch == AnsiConstants.BEL || ch == '\n' || ch == '\r' -> {
+                        parserState = ParserState.NORMAL
+                    }
+                    ch == AnsiConstants.ESC -> {
+                        parserState = ParserState.OSC_ESC
+                    }
+                    else -> {
+                        csiBuffer.append(ch)
+                        if (csiBuffer.length > 256) parserState = ParserState.NORMAL
+                    }
                 }
+            }
+            ParserState.OSC_ESC -> {
+                parserState = ParserState.NORMAL
             }
         }
     }
@@ -396,6 +409,53 @@ class TerminalBuffer(
         if (row !in 0 until rows) return ""
         String(CharArray(cols) { screen[row].cells[it].char })
     }
+
+    fun selectAll(): TerminalSelection = lock.withLock {
+        var firstRow = 0
+        var lastRow = rows - 1
+        var foundNonEmpty = false
+
+        for (r in 0 until rows) {
+            if (screen[r].cells.any { it.char != ' ' }) {
+                firstRow = r
+                foundNonEmpty = true
+                break
+            }
+        }
+
+        if (!foundNonEmpty) {
+            return@withLock TerminalSelection(
+                startRow = 0,
+                startCol = 0,
+                endRow = (rows - 1).coerceAtLeast(0),
+                endCol = (cols - 1).coerceAtLeast(0)
+            )
+        }
+
+        for (r in (rows - 1) downTo firstRow) {
+            if (screen[r].cells.any { it.char != ' ' }) {
+                lastRow = r
+                break
+            }
+        }
+
+        var lastCol = cols - 1
+        for (c in (cols - 1) downTo 0) {
+            if (screen[lastRow].cells[c].char != ' ') {
+                lastCol = c
+                break
+            }
+        }
+
+        TerminalSelection(
+            startRow = firstRow,
+            startCol = 0,
+            endRow = lastRow,
+            endCol = lastCol.coerceAtLeast(0)
+        )
+    }
+
+    fun extract(selection: TerminalSelection): String = extractSelectedText(selection)
 
     fun extractSelectedText(selection: TerminalSelection): String = lock.withLock {
         val norm = selection.normalized()

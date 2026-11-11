@@ -29,7 +29,7 @@ class SumiApp : Application() {
         workspaceRepository = WorkspaceRepository(this)
         rootfsInstaller = RootfsInstaller(this, workspaceRepository)
         performanceManager = PerformanceManager(this)
-        sessionManager = TerminalSessionManager(workspaceRepository, performanceManager)
+        sessionManager = TerminalSessionManager(this, workspaceRepository, performanceManager)
         alertDispatcher = AgentAlertDispatcher()
     }
 }

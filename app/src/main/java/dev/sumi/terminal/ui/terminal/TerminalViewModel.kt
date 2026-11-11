@@ -82,6 +82,10 @@ class TerminalViewModel(
         _mods.value = _mods.value.copy(alt = !_mods.value.alt)
     }
 
+    fun toggleShift() {
+        _mods.value = _mods.value.copy(shift = !_mods.value.shift)
+    }
+
     private fun consumeMods(): Mods {
         val current = _mods.value
         if (current.isAnyActive) {
@@ -108,45 +112,44 @@ class TerminalViewModel(
         active.write(bytes)
     }
 
-    fun runQuickCommand(cmd: String) {
-        val active = sessionManager.getActiveSession() ?: return
-        active.write((cmd + "\r").toByteArray(Charsets.UTF_8))
+    fun extractCurrentSelection(): String? {
+        val sel = _selection.value ?: return null
+        val active = sessionManager.getActiveSession() ?: return null
+        val text = active.buffer.extract(sel)
+        _selection.value = null
+        return text.takeIf { it.isNotEmpty() }
     }
 
     fun cdToDirectory(dir: File) {
         val active = sessionManager.getActiveSession() ?: return
-        active.write(("cd ${dir.absolutePath} && ls -la\r").toByteArray(Charsets.UTF_8))
+        active.write(("cd \"${dir.absolutePath}\" && ls -la\r").toByteArray(Charsets.UTF_8))
     }
 
     fun runScriptFile(file: File) {
         val active = sessionManager.getActiveSession() ?: return
         val command = when (file.extension.lowercase()) {
             "rs" -> "cargo run"
-            "sh", "bash" -> "sh ${file.absolutePath}"
-            else -> "cat ${file.absolutePath}"
+            "sh", "bash" -> "bash \"${file.absolutePath}\""
+            "py" -> "python3 \"${file.absolutePath}\""
+            else -> "cat \"${file.absolutePath}\""
         }
         active.write(("$command\r").toByteArray(Charsets.UTF_8))
     }
 
     /**
-     * Specification A (Safe Paste Mode):
-     * Any pasted text > 80 characters or containing a newline ('\n' or '\r')
-     * opens the PasteConfirmDialog before sending to the PTY.
+     * Opens the editable PasteConfirmDialog whenever text is pasted so the user can
+     * inspect and edit the command before confirming transmission to the PTY.
      */
     fun onPasteRequested(text: String) {
         if (text.isEmpty()) return
-        if (text.length > 80 || text.contains('\n') || text.contains('\r')) {
-            _pendingSafePaste.value = text
-        } else {
-            sendRawText(text)
-        }
+        _pendingSafePaste.value = text
     }
 
-    fun confirmSafePaste(bracketed: Boolean) {
-        val text = _pendingSafePaste.value ?: return
+    fun confirmSafePaste(editedText: String, bracketed: Boolean) {
         _pendingSafePaste.value = null
+        if (editedText.isEmpty()) return
         val active = sessionManager.getActiveSession() ?: return
-        val payload = KeyEncoder.wrapBracketedPaste(text, bracketed)
+        val payload = KeyEncoder.wrapBracketedPaste(editedText, bracketed)
         active.write(payload)
     }
 
@@ -156,6 +159,11 @@ class TerminalViewModel(
 
     fun updateSelection(newSelection: TerminalSelection?) {
         _selection.value = newSelection
+    }
+
+    fun selectAll() {
+        val active = sessionManager.getActiveSession() ?: return
+        _selection.value = active.buffer.selectAll()
     }
 
     fun setAppearanceVisible(visible: Boolean) {

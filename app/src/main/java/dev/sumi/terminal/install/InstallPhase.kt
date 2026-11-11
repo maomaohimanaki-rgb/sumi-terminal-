@@ -1,9 +1,10 @@
 package dev.sumi.terminal.install
 
 enum class InstallPhase(val title: String, val detail: String) {
-    CHECKING("Verificando Ambiente", "Inspecionando integridade do rootfs Arch Linux ARM64..."),
-    EXTRACTING_PROOT("Configurando PRoot & Binários", "Vinculando loader aarch64 e descritores PTY..."),
-    BOOTSTRAPPING_ARCH("Montando Arch Linux Rootfs", "Criando hierarquia FHS (/etc, /usr, /var/lib/pacman, /home/sumi)..."),
-    CONFIGURING_SHELL("Sincronizando Shell & Keyring", "Aplicando .bashrc, locales UTF-8 e variáveis xterm-256color..."),
-    READY("Ambiente Pronto", "Subsistema Sumi PTY operacional.")
+    IDLE("Aguardando", "Pronto para instalar o Arch Linux ARM64 Rootfs oficial."),
+    CHECKING("Verificando Ambiente", "Inspecionando partição ext4 interna e binários PRoot..."),
+    DOWNLOADING("Baixando Arch Linux ARM64", "Download HTTP Range resumível do espelho oficial archlinuxarm.org..."),
+    EXTRACTING("Extraindo Rootfs & Symlinks", "Descompactando tar.gz com symlinks nativos Os.symlink e Os.chmod..."),
+    CONFIGURING("Pós-Configuração Arch Linux", "Configurando resolv.conf, locale.conf, pacman.conf (DisableSandbox) e .bash_profile..."),
+    READY("Arch Linux ARM64 Pronto", "Rootfs instalado e verificado (.sumi-installed).")
 }
