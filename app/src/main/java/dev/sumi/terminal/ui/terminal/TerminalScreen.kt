@@ -3,16 +3,16 @@ package dev.sumi.terminal.ui.terminal
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.view.WindowManager
+import android.widget.Toast
+import androidx.activity.ComponentActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
@@ -22,11 +22,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import dev.sumi.terminal.ui.components.AccessoryBar
@@ -42,8 +38,6 @@ fun TerminalScreen(
     onOpenFiles: () -> Unit
 ) {
     val context = LocalContext.current
-    val composeClipboard = LocalClipboardManager.current
-    val hostView = LocalView.current
     val palette = LocalWabiSabiPalette.current
 
     val sessions by viewModel.sessions.collectAsState()
@@ -55,34 +49,46 @@ fun TerminalScreen(
     val pendingSafePaste by viewModel.pendingSafePaste.collectAsState()
     val showAppearance by viewModel.showAppearance.collectAsState()
 
-    var inputViewRef by remember { mutableStateOf<TerminalInputConnectionView?>(null) }
-
-    DisposableEffect(settings.keepScreenOn) {
-        hostView.keepScreenOn = settings.keepScreenOn
-        onDispose { hostView.keepScreenOn = false }
-    }
-
     val activeSession = remember(sessions, activeSessionId) {
         sessions.firstOrNull { it.id == activeSessionId } ?: sessions.firstOrNull()
     }
 
+    var inputViewRef by remember { mutableStateOf<TerminalInputConnectionView?>(null) }
+
+    // Keep screen on while terminal is visible if enabled
+    DisposableEffect(settings.keepScreenOn) {
+        val window = (context as? ComponentActivity)?.window
+        if (settings.keepScreenOn) {
+            window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        onDispose { }
+    }
+
     fun copyToSystemClipboard(text: String) {
         if (text.isEmpty()) return
-        composeClipboard.setText(AnnotatedString(text))
-        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-        cm?.setPrimaryClip(ClipData.newPlainText("Sumi Terminal", text))
+        runCatching {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+            cm.setPrimaryClip(ClipData.newPlainText("Sumi Terminal", text))
+            Toast.makeText(context, "Copiado (${text.length} chars)", Toast.LENGTH_SHORT).show()
+        }
     }
 
     fun triggerSystemClipboardPaste() {
-        val fromCompose = composeClipboard.getText()?.text
-        if (!fromCompose.isNullOrEmpty()) {
-            viewModel.onPasteRequested(fromCompose)
-            return
-        }
-        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-        val clipText = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
-        if (!clipText.isNullOrEmpty()) {
-            viewModel.onPasteRequested(clipText)
+        runCatching {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            val clip = cm?.primaryClip
+            val itemText = if (clip != null && clip.itemCount > 0) {
+                clip.getItemAt(0).coerceToText(context)?.toString().orEmpty()
+            } else {
+                ""
+            }
+            if (itemText.isNotEmpty()) {
+                viewModel.onPasteRequested(itemText)
+            } else {
+                Toast.makeText(context, "Área de transferência vazia", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -90,17 +96,16 @@ fun TerminalScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(palette.background)
-            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .systemBarsPadding()
             .imePadding()
-            .testTag("terminal_screen")
     ) {
         TabBar(
             sessions = sessions,
             activeSessionId = activeSession?.id,
             thermalState = thermalState,
             onSelectTab = viewModel::selectTab,
-            onNewTab = viewModel::createNewTab,
             onCloseTab = viewModel::closeTab,
+            onNewTab = viewModel::createNewTab,
             onOpenFiles = onOpenFiles,
             onOpenAppearance = { viewModel.setAppearanceVisible(true) }
         )
@@ -108,9 +113,8 @@ fun TerminalScreen(
         Box(
             modifier = Modifier
                 .weight(1f)
-                .fillMaxWidth()
+                .fillMaxSize()
         ) {
-            // Invisible native View with custom BaseInputConnection preserving Gboard/Samsung clipboard bar
             AndroidView(
                 factory = { ctx ->
                     TerminalInputConnectionView(

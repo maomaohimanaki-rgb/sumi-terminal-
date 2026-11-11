@@ -29,7 +29,11 @@ class PerformanceManager(private val context: Context) {
         const val FRAME_TARGET_NS: Long = 8_000_000L // 8ms target
     }
 
-    private val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+    private val hintLock = Any()
+    private val powerManager = runCatching {
+        context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+    }.getOrNull()
+
     private val _thermalState = MutableStateFlow(ThermalState.NONE)
     val thermalState: StateFlow<ThermalState> = _thermalState.asStateFlow()
 
@@ -42,7 +46,10 @@ class PerformanceManager(private val context: Context) {
     private var hintSession: PerformanceHintManager.Session? = null
 
     init {
-        trackedTids.add(Process.myTid())
+        val myTid = Process.myTid()
+        if (myTid > 0) {
+            trackedTids.add(myTid)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             runCatching {
                 powerManager?.addThermalStatusListener { status ->
@@ -58,6 +65,7 @@ class PerformanceManager(private val context: Context) {
                     }
                     _thermalState.value = next
                     _frameIntervalMs.value = next.frameIntervalMs
+                    updateTargetWorkDuration(next.frameIntervalMs * 1_000_000L / 2L)
                 }
             }
         }
@@ -83,12 +91,35 @@ class PerformanceManager(private val context: Context) {
 
     private fun rebuildHintSession() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            runCatching {
-                val phm = context.getSystemService(PerformanceHintManager::class.java) ?: return
-                val tids = trackedTids.filter { it > 0 }.toIntArray()
-                if (tids.isEmpty()) return
-                hintSession?.close()
-                hintSession = phm.createHintSession(tids, FRAME_TARGET_NS)
+            synchronized(hintLock) {
+                runCatching {
+                    val phm = context.getSystemService(PerformanceHintManager::class.java) ?: return
+                    val tids = trackedTids.filter { it > 0 }.toIntArray()
+                    if (tids.isEmpty()) return
+                    runCatching { hintSession?.close() }
+                    hintSession = runCatching {
+                        phm.createHintSession(tids, FRAME_TARGET_NS)
+                    }.getOrElse {
+                        // Fallback to single main process TID if custom ROM/chipset rejects child TIDs
+                        val selfTid = Process.myTid()
+                        if (selfTid > 0) {
+                            runCatching { phm.createHintSession(intArrayOf(selfTid), FRAME_TARGET_NS) }.getOrNull()
+                        } else {
+                            null
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun updateTargetWorkDuration(targetDurationNs: Long) {
+        if (targetDurationNs <= 0L) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            synchronized(hintLock) {
+                runCatching {
+                    hintSession?.updateTargetWorkDuration(targetDurationNs)
+                }
             }
         }
     }
@@ -96,8 +127,10 @@ class PerformanceManager(private val context: Context) {
     fun reportWorkDuration(actualDurationNs: Long) {
         if (actualDurationNs <= 0L) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            runCatching {
-                hintSession?.reportActualWorkDuration(actualDurationNs)
+            synchronized(hintLock) {
+                runCatching {
+                    hintSession?.reportActualWorkDuration(actualDurationNs)
+                }
             }
         }
     }

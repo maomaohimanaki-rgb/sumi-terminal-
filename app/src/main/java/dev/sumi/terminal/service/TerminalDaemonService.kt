@@ -65,31 +65,47 @@ class TerminalDaemonService : Service() {
     private fun promoteToForeground() {
         val notification = buildStatusNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            val startedSpecial = runCatching {
+            try {
                 startForeground(
                     NOTIFICATION_ID,
                     notification,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
                 )
-                true
-            }.getOrDefault(false)
-
-            if (!startedSpecial) {
-                val startedSync = runCatching {
-                    startForeground(
-                        NOTIFICATION_ID,
-                        notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-                    )
-                    true
-                }.getOrDefault(false)
-
-                if (!startedSync) {
-                    runCatching { startForeground(NOTIFICATION_ID, notification) }
-                }
+            } catch (_: SecurityException) {
+                tryFallbackStartForeground(notification)
+            } catch (_: android.app.ForegroundServiceStartNotAllowedException) {
+                // Allowed to continue in background if started while transitioning
+            } catch (_: Throwable) {
+                tryFallbackStartForeground(notification)
+            }
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                startForeground(NOTIFICATION_ID, notification)
+            } catch (_: SecurityException) {
+                // Ignore missing notification permission on modern Android
+            } catch (_: android.app.ForegroundServiceStartNotAllowedException) {
+                // Ignore background start restriction
+            } catch (_: Throwable) {
+                // Ignore
             }
         } else {
-            runCatching { startForeground(NOTIFICATION_ID, notification) }
+            try {
+                startForeground(NOTIFICATION_ID, notification)
+            } catch (_: SecurityException) {
+                // Ignore
+            } catch (_: Throwable) {
+                // Ignore
+            }
+        }
+    }
+
+    private fun tryFallbackStartForeground(notification: Notification) {
+        try {
+            startForeground(NOTIFICATION_ID, notification)
+        } catch (_: SecurityException) {
+            // Ignore
+        } catch (_: Throwable) {
+            // Ignore
         }
     }
 
@@ -215,9 +231,15 @@ class TerminalDaemonService : Service() {
         statusTickerJob = serviceScope.launch(Dispatchers.Main) {
             while (isActive) {
                 acquirePermanentWakeLock()
-                runCatching {
+                try {
                     val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
                     nm?.notify(NOTIFICATION_ID, buildStatusNotification())
+                } catch (_: SecurityException) {
+                    // Ignore missing POST_NOTIFICATIONS permission
+                } catch (_: android.app.ForegroundServiceStartNotAllowedException) {
+                    // Ignore foreground restriction
+                } catch (_: Throwable) {
+                    // Ignore
                 }
                 delay(5000L)
             }
@@ -290,13 +312,19 @@ class TerminalDaemonService : Service() {
         const val ACTION_STOP = "dev.sumi.terminal.STOP_DAEMON"
 
         fun startDaemon(context: Context) {
-            runCatching {
+            try {
                 val svcIntent = Intent(context, TerminalDaemonService::class.java)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     context.startForegroundService(svcIntent)
                 } else {
                     context.startService(svcIntent)
                 }
+            } catch (_: SecurityException) {
+                // Ignore
+            } catch (_: android.app.ForegroundServiceStartNotAllowedException) {
+                // Ignore if app is not yet in eligible state
+            } catch (_: Throwable) {
+                // Ignore
             }
         }
     }

@@ -76,14 +76,7 @@ fun SumiRootApp(app: SumiApp) {
 
     LaunchedEffect(Unit) {
         // Start hardened anti-sleep foreground daemon
-        runCatching {
-            val svcIntent = Intent(context, TerminalDaemonService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(svcIntent)
-            } else {
-                context.startService(svcIntent)
-            }
-        }
+        TerminalDaemonService.startDaemon(context)
         // Automatically start/verify Arch Linux ARM64 installation
         app.rootfsInstaller.startInstall()
     }

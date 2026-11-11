@@ -49,13 +49,12 @@
 
         <service
             android:name="dev.sumi.terminal.service.TerminalDaemonService"
-            android:enabled="true"
+            android:foregroundServiceType="specialUse"
             android:exported="false"
-            android:foregroundServiceType="specialUse|dataSync"
             android:stopWithTask="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keeps Linux PRoot/PTY sessions, WakeLock, and IPC socket alive during background execution." />
+                android:value="Terminal PTY daemon and background shell management" />
         </service>
     </application>
 

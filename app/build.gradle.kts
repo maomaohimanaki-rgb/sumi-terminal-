@@ -15,7 +15,7 @@ android {
   defaultConfig {
     applicationId = "com.aistudio.sumiterminal.kxzpqm"
     minSdk = 24
-    targetSdk = 36
+    targetSdk = 30
     versionCode = 2
     versionName = "2.0-zen"
 

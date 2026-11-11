@@ -86,6 +86,7 @@ void* readerLoop(void* arg) {
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     gVm = vm;
+    signal(SIGPIPE, SIG_IGN);
     return JNI_VERSION_1_6;
 }
 
@@ -93,6 +94,7 @@ extern "C" JNIEXPORT jlong JNICALL
 Java_dev_sumi_terminal_nativebridge_PtyNative_nativeStart(
         JNIEnv* env, jobject, jstring jcmd, jobjectArray jargs, jobjectArray jenv,
         jstring jcwd, jint rows, jint cols, jobject listener) {
+    signal(SIGPIPE, SIG_IGN);
     const char* cmdC = env->GetStringUTFChars(jcmd, nullptr);
     const char* cwdC = env->GetStringUTFChars(jcwd, nullptr);
     std::string cmd(cmdC), cwd(cwdC);
@@ -125,6 +127,7 @@ Java_dev_sumi_terminal_nativebridge_PtyNative_nativeStart(
         return 0;
     }
     if (pid == 0) {
+        signal(SIGPIPE, SIG_DFL);
         if (!cwd.empty()) {
             if (chdir(cwd.c_str()) != 0) { /* continua no diretorio herdado */ }
         }

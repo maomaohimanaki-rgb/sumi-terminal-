@@ -1,8 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item
-        android:width="66dp"
-        android:height="66dp"
-        android:drawable="@drawable/img_launcher_sumi_1794356389608"
-        android:gravity="center" />
-</layer-list>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFD9383A"
+        android:pathData="M26,26h56v56h-56z" />
+    <path
+        android:fillColor="#FFF2EFE9"
+        android:pathData="M34,38l16,14l-16,14l4,4l20,-18l-20,-18zM56,64h18v5h-18z" />
+</vector>

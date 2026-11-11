@@ -30,17 +30,15 @@ internal fun computeImeDelta(oldComposing: String, newComposing: String): ImeDel
 /**
  * Native View subclass for terminal IME capture.
  *
- * Eliminates "Composing Text Multiplication" ("l" -> "llk" -> "llklkj") and post-Enter
- * buffer leaks ("lkjhgfdsaclkjhgfdsacd") by:
- * 1. Configuring `TYPE_CLASS_TEXT | TYPE_TEXT_VARIATION_VISIBLE_PASSWORD | TYPE_TEXT_FLAG_NO_SUGGESTIONS`
- *    and `IME_FLAG_NO_PERSONALIZED_LEARNING` so Gboard disables cumulative word composition
- *    while keeping the top Gboard clipboard/utility bar active.
- * 2. Tracking exact character deltas (`composingBuffer`) across `setComposingText` and `commitText`
- *    so even if an IME insists on calling `setComposingText("lk")`, only the newly typed suffix `"k"`
- *    is transmitted to the PTY.
- * 3. Performing a hard IME session reset (`finishComposingText()` + `imm.restartInput(this)`)
- *    whenever Enter (`KEYCODE_ENTER`, `IME_ACTION_*`, or `\n`) is triggered so previous command
- *    buffers never leak into the next shell prompt.
+ * 1. Configures `InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS`
+ *    WITHOUT any Password variation or `IME_FLAG_NO_PERSONALIZED_LEARNING`, ensuring
+ *    SwiftKey and Gboard open in Normal Mode (never Incognito/Anonymous) with their
+ *    top toolbar and clipboard active.
+ * 2. Preserves the active composing buffer (`composingBuffer`) while the IME has an
+ *    open composition (`setComposingText`), computing exact character deltas via
+ *    `computeImeDelta` so 1 keystroke emits strictly 1 character to the PTY.
+ * 3. Explicitly finishes the composing region (`finishComposingText()`) and resets
+ *    the IME state before clearing the buffer when Enter or a control key is pressed.
  */
 class TerminalInputConnectionView(
     context: Context,
@@ -51,7 +49,7 @@ class TerminalInputConnectionView(
 ) : View(context) {
 
     private var composingBuffer: String = ""
-    private var activeConnection: InputConnection? = null
+    private var activeConnection: BaseInputConnection? = null
 
     init {
         isFocusable = true
@@ -65,10 +63,14 @@ class TerminalInputConnectionView(
     }
 
     /**
-     * Hard-resets the IME composing state and restarts the input connection so Gboard
-     * completely discards any accumulated word buffer (e.g., on Enter, Ctrl+C, or Tab).
+     * Explicitly finishes any active IME composition before clearing `composingBuffer`
+     * and restarting the input connection (e.g., on Enter, Ctrl+C, or Tab).
      */
     fun resetImeState() {
+        runCatching {
+            activeConnection?.finishComposingText()
+            activeConnection?.editable?.clear()
+        }
         composingBuffer = ""
         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
         imm?.restartInput(this)
@@ -79,12 +81,10 @@ class TerminalInputConnectionView(
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
         composingBuffer = ""
         outAttrs.inputType = InputType.TYPE_CLASS_TEXT or
-                InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
                 InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         outAttrs.imeOptions = EditorInfo.IME_ACTION_NONE or
                 EditorInfo.IME_FLAG_NO_FULLSCREEN or
-                EditorInfo.IME_FLAG_NO_EXTRACT_UI or
-                EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+                EditorInfo.IME_FLAG_NO_EXTRACT_UI
         outAttrs.initialSelStart = 0
         outAttrs.initialSelEnd = 0
 
@@ -119,12 +119,16 @@ class TerminalInputConnectionView(
                 }
 
                 if (hasTrailingNewline) {
+                    super.finishComposingText()
                     composingBuffer = ""
                     onKey(TermKey.ENTER)
                     resetImeState()
                 } else if (isCommit) {
+                    // Composition completed; clear composing tracker only after commit
+                    super.finishComposingText()
                     composingBuffer = ""
                 } else {
+                    // Never clear composingBuffer while composition is active
                     composingBuffer = cleanTarget
                 }
             }
@@ -146,8 +150,7 @@ class TerminalInputConnectionView(
 
             override fun setComposingRegion(start: Int, end: Int): Boolean {
                 if (!isCurrentConnection()) return false
-                composingBuffer = ""
-                return true
+                return super.setComposingRegion(start, end)
             }
 
             override fun finishComposingText(): Boolean {
@@ -158,6 +161,7 @@ class TerminalInputConnectionView(
 
             override fun performEditorAction(editorAction: Int): Boolean {
                 if (!isCurrentConnection()) return false
+                super.finishComposingText()
                 composingBuffer = ""
                 onKey(TermKey.ENTER)
                 resetImeState()
@@ -179,17 +183,14 @@ class TerminalInputConnectionView(
                 return super.deleteSurroundingText(beforeLength, afterLength)
             }
 
-            override fun getTextBeforeCursor(length: Int, flags: Int): CharSequence = ""
+            override fun getTextBeforeCursor(length: Int, flags: Int): CharSequence {
+                if (length <= 0 || composingBuffer.isEmpty()) return ""
+                return composingBuffer.takeLast(length)
+            }
 
             override fun getTextAfterCursor(length: Int, flags: Int): CharSequence = ""
 
             override fun getSelectedText(flags: Int): CharSequence? = null
-
-            override fun getEditable(): Editable? {
-                val ed = super.getEditable()
-                ed?.clear()
-                return ed
-            }
 
             override fun sendKeyEvent(event: KeyEvent): Boolean {
                 if (!isCurrentConnection()) return false

@@ -6,5 +6,6 @@ enum class InstallPhase(val title: String, val detail: String) {
     DOWNLOADING("Baixando Arch Linux ARM64", "Download HTTP Range resumível do espelho oficial archlinuxarm.org..."),
     EXTRACTING("Extraindo Rootfs & Symlinks", "Descompactando tar.gz com symlinks nativos Os.symlink e Os.chmod..."),
     CONFIGURING("Pós-Configuração Arch Linux", "Configurando resolv.conf, locale.conf, pacman.conf (DisableSandbox) e .bash_profile..."),
-    READY("Arch Linux ARM64 Pronto", "Rootfs instalado e verificado (.sumi-installed).")
+    READY("Arch Linux ARM64 Pronto", "Rootfs instalado e verificado (.sumi-installed)."),
+    ERROR("Falha na Instalação", "Erro ao baixar ou extrair o rootfs. Toque para retomar via HTTP Range.")
 }

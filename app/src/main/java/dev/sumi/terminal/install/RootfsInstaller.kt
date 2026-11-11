@@ -11,7 +11,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
 import java.io.BufferedInputStream
@@ -19,147 +18,53 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.FilterInputStream
-import java.io.InputStream
-import java.util.Locale
+import java.io.IOException
 import java.util.concurrent.TimeUnit
-import kotlin.math.min
 
 class RootfsInstaller(
     private val context: Context,
     private val workspaceRepository: WorkspaceRepository
 ) {
     companion object {
-        const val ARCH_ROOTFS_URL = "https://fl.us.mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
-        const val FALLBACK_ARCH_URL = "http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
-        private const val MAX_RETRIES = 6
+        const val ARCH_ROOTFS_URL = "http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
+        const val FALLBACK_ARCH_URL = "https://mirrors.dotsrc.org/archlinuxarm/os/ArchLinuxARM-aarch64-latest.tar.gz"
+        private const val MAX_RETRIES = 4
         private val ESSENTIAL_BINARIES = setOf(
-            "usr/bin/bash",
-            "usr/bin/sh",
-            "usr/bin/pacman",
-            "usr/bin/env",
-            "usr/bin/su",
-            "usr/bin/id",
-            "usr/bin/ls",
-            "usr/bin/cat",
-            "usr/bin/chmod",
-            "usr/bin/mkdir",
-            "bin/bash",
-            "bin/sh"
+            "bin", "sbin", "usr/bin", "usr/sbin", "usr/lib", "etc"
         )
     }
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .connectTimeout(25, TimeUnit.SECONDS)
+        .readTimeout(45, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
 
     private val _state = MutableStateFlow(
-        if (isInstalled()) {
-            InstallState(
-                phase = InstallPhase.READY,
-                progress = 1f,
-                isComplete = true
-            )
-        } else {
-            InstallState(phase = InstallPhase.IDLE)
-        }
+        InstallState(
+            phase = if (isInstalled()) InstallPhase.READY else InstallPhase.IDLE,
+            progress = if (isInstalled()) 1f else 0f,
+            isInstalling = false,
+            isComplete = isInstalled()
+        )
     )
     val state: StateFlow<InstallState> = _state.asStateFlow()
 
     private val partArchiveFile: File
-        get() = File(context.filesDir, "rootfs.tar.gz.part")
+        get() = File(context.cacheDir, "ArchLinuxARM-aarch64-latest.tar.gz.part")
 
     fun isInstalled(): Boolean {
-        val marker = workspaceRepository.installedMarkerFile
-        val bashBin = File(workspaceRepository.rootfsDir, "usr/bin/bash")
-        return marker.exists() && (bashBin.exists() || isSymlinkPresent(bashBin))
+        val rootfs = workspaceRepository.rootfsDir
+        val bashFile = File(rootfs, "usr/bin/bash")
+        return workspaceRepository.installedMarkerFile.exists() && bashFile.exists()
     }
 
-    private fun isSymlinkPresent(file: File): Boolean {
-        return runCatching {
-            Os.lstat(file.absolutePath)
-            true
-        }.getOrDefault(false)
-    }
-
-    suspend fun startInstall(forceClean: Boolean = false) = withContext(Dispatchers.IO) {
+    suspend fun startInstall(forceReinstall: Boolean = false) = withContext(Dispatchers.IO) {
         if (_state.value.isInstalling) return@withContext
-        if (isInstalled() && !forceClean) {
-            runCatching {
-                applyArchPostConfiguration(workspaceRepository.rootfsDir) {}
-            }
-            _state.value = InstallState(
-                phase = InstallPhase.READY,
-                progress = 1f,
-                isComplete = true,
-                logLines = listOf("[✓] Arch Linux ARM64 (.sumi-installed) verificado e configurado.")
-            )
-            return@withContext
-        }
 
-        val logs = mutableListOf<String>()
-        fun appendLog(msg: String) {
-            synchronized(logs) {
-                logs.add(msg)
-                if (logs.size > 80) logs.removeAt(0)
-            }
-            _state.value = _state.value.copy(logLines = logs.toList())
-        }
-
-        _state.value = InstallState(
-            phase = InstallPhase.CHECKING,
-            progress = 0.01f,
-            isInstalling = true,
-            error = null
-        )
-
-        runCatching {
-            val rootfsDir = workspaceRepository.rootfsDir
-            if (forceClean) {
-                appendLog("[*] Limpando instalação anterior...")
-                rootfsDir.deleteRecursively()
-                rootfsDir.mkdirs()
-                if (partArchiveFile.exists()) partArchiveFile.delete()
-            }
-
-            // 1. Download Resumível com HTTP Range e Exponential Backoff
-            appendLog("[*] Iniciando download resumível: $ARCH_ROOTFS_URL")
-            downloadWithRangeResume(
-                urls = listOf(ARCH_ROOTFS_URL, FALLBACK_ARCH_URL),
-                targetPartFile = partArchiveFile,
-                onLog = ::appendLog
-            )
-
-            // 2. Extração Real com TarArchiveInputStream(GzipCompressorInputStream) + Os.symlink + Os.chmod
-            appendLog("[*] Extraindo arquivo Tar/Gzip preservando symlinks e permissões Unix...")
-            extractRootfsArchive(
-                archiveFile = partArchiveFile,
-                destRootfs = rootfsDir,
-                onLog = ::appendLog
-            )
-
-            // 3. Pós-Configuração do Arch Linux ARM64
-            _state.value = _state.value.copy(
-                phase = InstallPhase.CONFIGURING,
-                progress = 0.96f
-            )
-            appendLog("[*] Aplicando pós-configuração (/etc/resolv.conf, locale.conf, pacman.conf, .bash_profile)...")
-            applyArchPostConfiguration(rootfsDir, ::appendLog)
-
-            // Remover arquivo .part após extração validada para liberar armazenamento
-            if (partArchiveFile.exists()) {
-                partArchiveFile.delete()
-            }
-
-            // 4. Criar marcador definitivo .sumi-installed
-            workspaceRepository.installedMarkerFile.writeText(
-                "archlinux-arm64-proot-installed=${System.currentTimeMillis()}\n",
-                Charsets.UTF_8
-            )
-            appendLog("[✓] Arch Linux ARM64 instalado com sucesso (.sumi-installed).")
-
+        if (!forceReinstall && isInstalled()) {
+            applyArchPostConfiguration(workspaceRepository.rootfsDir) {}
             _state.value = _state.value.copy(
                 phase = InstallPhase.READY,
                 progress = 1f,
@@ -167,122 +72,185 @@ class RootfsInstaller(
                 isComplete = true,
                 error = null
             )
-        }.onFailure { err ->
-            appendLog("[!] ERRO: ${err.message ?: err.javaClass.simpleName}")
+            return@withContext
+        }
+
+        val logs = mutableListOf<String>()
+        fun appendLog(msg: String) {
+            logs.add(msg)
+            _state.value = _state.value.copy(logLines = logs.takeLast(12))
+        }
+
+        try {
             _state.value = _state.value.copy(
+                phase = InstallPhase.CHECKING,
+                progress = 0.02f,
+                isInstalling = true,
+                isComplete = false,
+                error = null
+            )
+            appendLog("Verificando espelhos oficiais Arch Linux ARM64...")
+
+            val archiveTarget = partArchiveFile
+            downloadWithRangeResume(
+                urls = listOf(ARCH_ROOTFS_URL, FALLBACK_ARCH_URL),
+                destFile = archiveTarget,
+                onLog = ::appendLog
+            )
+
+            _state.value = _state.value.copy(
+                phase = InstallPhase.EXTRACTING,
+                progress = 0.55f
+            )
+            appendLog("Extraindo árvore rootfs com symlinks POSIX nativos...")
+
+            extractRootfsArchive(
+                archiveFile = archiveTarget,
+                rootfsDir = workspaceRepository.rootfsDir,
+                onLog = ::appendLog
+            )
+
+            _state.value = _state.value.copy(
+                phase = InstallPhase.CONFIGURING,
+                progress = 0.94f
+            )
+            appendLog("Configurando DNS, /etc/pacman.conf (DisableSandbox) e perfil root...")
+
+            applyArchPostConfiguration(
+                rootfsDir = workspaceRepository.rootfsDir,
+                onLog = ::appendLog
+            )
+
+            workspaceRepository.installedMarkerFile.writeText("arch-arm64-ready\n", Charsets.UTF_8)
+            runCatching { archiveTarget.delete() }
+
+            appendLog("Arch Linux ARM64 pronto para execução via PRoot.")
+            _state.value = _state.value.copy(
+                phase = InstallPhase.READY,
+                progress = 1f,
                 isInstalling = false,
-                error = err.message ?: "Falha durante a instalação do Arch Linux ARM64."
+                isComplete = true,
+                error = null
+            )
+        } catch (e: Throwable) {
+            val msg = e.message ?: e.javaClass.simpleName
+            appendLog("Erro: $msg")
+            _state.value = _state.value.copy(
+                phase = InstallPhase.ERROR,
+                isInstalling = false,
+                isComplete = false,
+                error = msg
             )
         }
     }
 
     private suspend fun downloadWithRangeResume(
         urls: List<String>,
-        targetPartFile: File,
+        destFile: File,
         onLog: (String) -> Unit
     ) {
-        var attempt = 0
-        var urlIndex = 0
-        while (attempt < MAX_RETRIES) {
-            val currentUrl = urls[urlIndex % urls.size]
-            val existingBytes = if (targetPartFile.exists()) targetPartFile.length() else 0L
+        var lastException: Throwable? = null
 
-            val reqBuilder = Request.Builder()
-                .url(currentUrl)
-                .header("User-Agent", "SumiTerminal/2.0 (ArchLinuxARM; aarch64)")
-            if (existingBytes > 0L) {
-                reqBuilder.header("Range", "bytes=$existingBytes-")
-                onLog("[*] Retomando download a partir de ${existingBytes / (1024 * 1024)} MB (Range: bytes=$existingBytes-)...")
-            }
+        for (attempt in 1..MAX_RETRIES) {
+            val activeUrl = urls[(attempt - 1) % urls.size]
+            try {
+                val existingBytes = if (destFile.exists()) destFile.length() else 0L
+                val reqBuilder = Request.Builder()
+                    .url(activeUrl)
+                    .header("User-Agent", "SumiTerminal/2.0 (Android; AArch64)")
 
-            val result = runCatching {
+                if (existingBytes > 0L) {
+                    reqBuilder.header("Range", "bytes=$existingBytes-")
+                    onLog("Retomando download a partir de ${existingBytes / (1024 * 1024)} MB...")
+                } else {
+                    onLog("Conectando a $activeUrl (tentativa $attempt/$MAX_RETRIES)...")
+                }
+
                 httpClient.newCall(reqBuilder.build()).execute().use { response ->
                     val code = response.code
                     if (code == 416) {
-                        // Range Not Satisfiable -> arquivo já foi completamente baixado
-                        onLog("[✓] Arquivo parcial já está completo (${existingBytes / (1024 * 1024)} MB).")
+                        onLog("Arquivo .tar.gz já completo em cache.")
                         return
                     }
                     if (!response.isSuccessful && code != 206) {
-                        throw IllegalStateException("HTTP $code ao baixar $currentUrl")
+                        throw IOException("HTTP $code ao baixar rootfs")
                     }
 
-                    val isResume = (code == 206 && existingBytes > 0L)
+                    val isPartial = (code == 206)
                     val contentLen = response.body?.contentLength() ?: -1L
-                    val totalExpected = if (contentLen > 0) {
-                        if (isResume) existingBytes + contentLen else contentLen
+                    val totalExpected = if (isPartial && contentLen > 0) {
+                        existingBytes + contentLen
+                    } else if (contentLen > 0) {
+                        contentLen
                     } else {
-                        580L * 1024L * 1024L // Estimativa ~580MB caso chunked
+                        550L * 1024L * 1024L
                     }
 
+                    val startOffset = if (isPartial) existingBytes else 0L
                     val bodyStream = response.body?.byteStream()
-                        ?: throw IllegalStateException("Corpo HTTP vazio")
+                        ?: throw IOException("Stream HTTP vazio")
 
-                    FileOutputStream(targetPartFile, isResume).use { out ->
+                    FileOutputStream(destFile, isPartial).use { out ->
                         val buf = ByteArray(64 * 1024)
-                        var currentDownloaded = if (isResume) existingBytes else 0L
+                        var downloaded = startOffset
                         var windowBytes = 0L
-                        var lastTickMs = System.currentTimeMillis()
+                        var windowStartMs = System.currentTimeMillis()
 
                         while (true) {
-                            val read = bodyStream.read(buf)
-                            if (read == -1) break
-                            out.write(buf, 0, read)
-                            currentDownloaded += read
-                            windowBytes += read
+                            val n = bodyStream.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            downloaded += n
+                            windowBytes += n
 
                             val now = System.currentTimeMillis()
-                            val elapsedMs = now - lastTickMs
-                            if (elapsedMs >= 250L) {
-                                val speed = (windowBytes * 1000L) / elapsedMs.coerceAtLeast(1L)
-                                val ratio = (currentDownloaded.toFloat() / totalExpected.coerceAtLeast(1L)).coerceIn(0f, 1f)
+                            val elapsed = now - windowStartMs
+                            if (elapsed >= 250L) {
+                                val speed = (windowBytes * 1000L) / elapsed.coerceAtLeast(1L)
+                                val ratio = (downloaded.toFloat() / totalExpected.coerceAtLeast(1L).toFloat())
+                                    .coerceIn(0f, 1f)
                                 _state.value = _state.value.copy(
                                     phase = InstallPhase.DOWNLOADING,
-                                    progress = ratio * 0.55f,
-                                    downloadedBytes = currentDownloaded,
+                                    progress = 0.05f + (ratio * 0.48f),
+                                    downloadedBytes = downloaded,
                                     totalBytes = totalExpected,
                                     speedBytesPerSec = speed
                                 )
                                 windowBytes = 0L
-                                lastTickMs = now
+                                windowStartMs = now
                             }
                         }
                         out.flush()
                     }
                 }
-            }
-
-            if (result.isSuccess) {
-                onLog("[✓] Download concluído (${targetPartFile.length() / (1024 * 1024)} MB).")
                 return
-            } else {
-                attempt++
-                urlIndex++
-                val errMsg = result.exceptionOrNull()?.message ?: "Erro de rede"
-                if (attempt >= MAX_RETRIES) {
-                    throw IllegalStateException("Falha no download após $MAX_RETRIES tentativas: $errMsg")
+            } catch (e: Throwable) {
+                lastException = e
+                onLog("Oscilação de rede (${e.message}). Retentando com backoff...")
+                if (attempt < MAX_RETRIES) {
+                    delay(1500L * attempt)
                 }
-                val backoffMs = min(16000L, 1000L * (1L shl (attempt - 1)))
-                onLog("[!] Tentativa $attempt/$MAX_RETRIES falhou ($errMsg). Reconectando em ${backoffMs / 1000}s...")
-                delay(backoffMs)
             }
         }
+
+        throw lastException ?: IOException("Falha ao baixar Arch Linux ARM64 após $MAX_RETRIES tentativas")
     }
 
     private fun extractRootfsArchive(
         archiveFile: File,
-        destRootfs: File,
+        rootfsDir: File,
         onLog: (String) -> Unit
     ) {
+        if (!rootfsDir.exists()) rootfsDir.mkdirs()
         val totalArchiveBytes = archiveFile.length().coerceAtLeast(1L)
         var bytesReadCompressed = 0L
         var entriesCount = 0
-        var lastUiUpdateMs = 0L
+        val deferredHardLinks = mutableListOf<Pair<File, File>>()
 
         val countingStream = object : FilterInputStream(BufferedInputStream(FileInputStream(archiveFile), 128 * 1024)) {
             override fun read(): Int {
                 val b = super.read()
-                if (b != -1) bytesReadCompressed++
+                if (b >= 0) bytesReadCompressed++
                 return b
             }
 
@@ -293,144 +261,152 @@ class RootfsInstaller(
             }
         }
 
-        // Deferred hardlinks and permissions to ensure targets exist first
-        val deferredHardLinks = mutableListOf<Pair<File, File>>()
+        GzipCompressorInputStream(countingStream).use { gzIn ->
+            TarArchiveInputStream(gzIn).use { tarIn ->
+                val copyBuf = ByteArray(64 * 1024)
+                while (true) {
+                    val entry = tarIn.nextTarEntry ?: break
+                    val cleanName = entry.name
+                        .removePrefix("./")
+                        .removePrefix("/")
+                        .trim()
+                    if (cleanName.isEmpty() || cleanName.startsWith("dev/") || cleanName.startsWith("proc/") || cleanName.startsWith("sys/")) {
+                        continue
+                    }
 
-        TarArchiveInputStream(GzipCompressorInputStream(countingStream), "UTF-8").use { tarIn ->
-            val copyBuf = ByteArray(64 * 1024)
-            var entry: TarArchiveEntry? = tarIn.nextEntry
-            while (entry != null) {
-                val rawName = entry.name.removePrefix("./").removePrefix("/")
-                if (rawName.isNotEmpty() && !rawName.startsWith("dev/") && rawName != "dev") {
-                    val target = File(destRootfs, rawName)
-                    val mode = entry.mode and 0xFFF
+                    val targetFile = File(rootfsDir, cleanName)
+                    val canonicalRoot = rootfsDir.canonicalPath
+                    val parentCanonical = targetFile.parentFile?.canonicalPath ?: canonicalRoot
+                    if (!parentCanonical.startsWith(canonicalRoot)) {
+                        continue
+                    }
+
+                    targetFile.parentFile?.let { parent ->
+                        if (!parent.exists()) parent.mkdirs()
+                    }
 
                     when {
                         entry.isDirectory -> {
-                            target.mkdirs()
-                            // Diretórios: mode or 0700 (448) para garantir escrita pelo app
-                            runCatching { Os.chmod(target.path, if (mode != 0) (mode or 448) else 493) }
+                            if (!targetFile.exists()) targetFile.mkdirs()
+                            runCatching { Os.chmod(targetFile.path, 493) } // 0755
                         }
                         entry.isSymbolicLink -> {
-                            target.parentFile?.mkdirs()
-                            deleteExistingOrDangling(target)
-                            runCatching {
-                                Os.symlink(entry.linkName, target.path)
+                            deleteExistingOrDangling(targetFile)
+                            val linkTarget = entry.linkName
+                            val linked = runCatching {
+                                Os.symlink(linkTarget, targetFile.path)
+                                true
+                            }.getOrDefault(false)
+                            if (!linked) {
+                                deferredHardLinks.add(File(targetFile.parentFile, linkTarget) to targetFile)
                             }
                         }
                         entry.isLink -> {
-                            target.parentFile?.mkdirs()
-                            val linkTargetName = entry.linkName.removePrefix("./").removePrefix("/")
-                            val linkSource = File(destRootfs, linkTargetName)
-                            deferredHardLinks.add(linkSource to target)
+                            deleteExistingOrDangling(targetFile)
+                            val cleanLink = entry.linkName.removePrefix("./").removePrefix("/")
+                            val linkSource = File(rootfsDir, cleanLink)
+                            val linked = runCatching {
+                                Os.link(linkSource.path, targetFile.path)
+                                true
+                            }.getOrDefault(false)
+                            if (!linked) {
+                                deferredHardLinks.add(linkSource to targetFile)
+                            }
                         }
                         entry.isFile -> {
-                            target.parentFile?.let { parent ->
-                                if (!parent.exists()) {
-                                    parent.mkdirs()
-                                    runCatching { Os.chmod(parent.path, 493) }
+                            deleteExistingOrDangling(targetFile)
+                            FileOutputStream(targetFile).use { fos ->
+                                var remaining = entry.size
+                                while (remaining > 0L) {
+                                    val toRead = minOf(remaining, copyBuf.size.toLong()).toInt()
+                                    val r = tarIn.read(copyBuf, 0, toRead)
+                                    if (r <= 0) break
+                                    fos.write(copyBuf, 0, r)
+                                    remaining -= r
                                 }
                             }
-                            deleteExistingOrDangling(target)
-                            FileOutputStream(target).use { out ->
-                                var n = tarIn.read(copyBuf)
-                                while (n != -1) {
-                                    out.write(copyBuf, 0, n)
-                                    n = tarIn.read(copyBuf)
-                                }
+                            val mode = entry.mode and 511 // 0777
+                            val isExecPath = ESSENTIAL_BINARIES.any { cleanName.startsWith("$it/") } ||
+                                    cleanName.endsWith(".so") ||
+                                    cleanName.contains(".so.")
+                            val finalMode = if (isExecPath || (mode and 73) != 0) {
+                                493 // 0755
+                            } else {
+                                if (mode > 0) mode else 420 // 0644
                             }
-                            val finalMode = when {
-                                rawName in ESSENTIAL_BINARIES -> 493 // 0755 (0x1ED)
-                                (mode and 73) != 0 -> (mode or 493)  // executável -> 0755
-                                mode != 0 -> (mode or 384)           // arquivo normal -> mode or 0600
-                                else -> 420                          // 0644
-                            }
-                            runCatching { Os.chmod(target.path, finalMode) }
+                            runCatching { Os.chmod(targetFile.path, finalMode) }
                         }
                     }
 
                     entriesCount++
-                    val now = System.currentTimeMillis()
-                    if (now - lastUiUpdateMs >= 200L) {
-                        val extractRatio = (bytesReadCompressed.toFloat() / totalArchiveBytes).coerceIn(0f, 1f)
+                    if (entriesCount % 250 == 0) {
+                        val ratio = (bytesReadCompressed.toFloat() / totalArchiveBytes.toFloat()).coerceIn(0f, 1f)
                         _state.value = _state.value.copy(
                             phase = InstallPhase.EXTRACTING,
-                            progress = 0.55f + (extractRatio * 0.40f),
+                            progress = 0.55f + (ratio * 0.38f),
                             extractedEntries = entriesCount,
-                            currentEntry = rawName
+                            currentEntry = cleanName
                         )
-                        lastUiUpdateMs = now
                     }
                 }
-                entry = tarIn.nextEntry
             }
         }
 
-        // Resolve hardlinks inside tar archive ( via Os.link or symlink/copy fallback )
+        // Resolve any deferred hardlinks where target appeared later in the archive
         for ((src, dst) in deferredHardLinks) {
-            if (src.exists()) {
-                deleteExistingOrDangling(dst)
-                val linked = runCatching {
-                    Os.link(src.path, dst.path)
-                    true
-                }.getOrDefault(false)
-                if (!linked) {
-                    runCatching {
-                        src.copyTo(dst, overwrite = true)
-                        Os.chmod(dst.path, 493)
-                    }
+            if (src.exists() && !dst.exists()) {
+                runCatching {
+                    src.copyTo(dst, overwrite = true)
+                    Os.chmod(dst.path, 493)
                 }
             }
         }
-
-        // Ensure essential binaries explicitly have 0755 (0x1ED)
-        for (rel in ESSENTIAL_BINARIES) {
-            val bin = File(destRootfs, rel)
-            if (bin.exists()) {
-                runCatching { Os.chmod(bin.path, 493) }
-            }
-        }
-
-        onLog("[✓] Extraídos $entriesCount nós Unix (arquivos, diretórios e symlinks).")
+        onLog("Extração concluída: $entriesCount arquivos e links simbólicos.")
     }
 
     private fun deleteExistingOrDangling(file: File) {
-        runCatching {
-            Os.lstat(file.path)
-            Os.remove(file.path)
+        if (isSymlinkPresent(file) || file.exists()) {
+            runCatching { Os.remove(file.path) }
+            runCatching { file.delete() }
         }
-        if (file.exists()) {
-            file.delete()
+    }
+
+    private fun isSymlinkPresent(file: File): Boolean {
+        return try {
+            val st = Os.lstat(file.path)
+            (st.st_mode and 0xF000) == 0xA000
+        } catch (_: Throwable) {
+            false
         }
     }
 
     private fun applyArchPostConfiguration(rootfsDir: File, onLog: (String) -> Unit) {
-        // 1. /etc/resolv.conf (remover symlink quebrado do systemd-resolved antes de gravar)
         val etcDir = File(rootfsDir, "etc").apply { mkdirs() }
+        val varLibPacman = File(rootfsDir, "var/lib/pacman")
+        File(varLibPacman, "db.lck").takeIf { it.exists() }?.delete()
+
         val resolvConf = File(etcDir, "resolv.conf")
         deleteExistingOrDangling(resolvConf)
         resolvConf.writeText(
-            "nameserver 1.1.1.1\nnameserver 8.8.8.8\n",
+            "nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 9.9.9.9\n",
             Charsets.UTF_8
         )
-        runCatching { Os.chmod(resolvConf.path, 420) } // 0644
+        runCatching { Os.chmod(resolvConf.path, 420) }
 
-        // 2. /etc/locale.conf
-        val localeConf = File(etcDir, "locale.conf")
-        deleteExistingOrDangling(localeConf)
-        localeConf.writeText(
-            "LANG=C.UTF-8\nLC_ALL=C.UTF-8\n",
-            Charsets.UTF_8
-        )
-        runCatching { Os.chmod(localeConf.path, 420) }
+        val hosts = File(etcDir, "hosts")
+        if (!hosts.exists() || hosts.length() == 0L) {
+            hosts.writeText("127.0.0.1 localhost\n::1 localhost\n", Charsets.UTF_8)
+            runCatching { Os.chmod(hosts.path, 420) }
+        }
 
-        // 3. /etc/pacman.conf: Desativar CheckSpace (#CheckSpace), descomentar/injetar DisableSandbox e desativar SandboxUser em [options]
+        // Configure /etc/pacman.conf for PRoot (DisableSandbox, #CheckSpace, #SandboxUser)
         val pacmanConf = File(etcDir, "pacman.conf")
         if (pacmanConf.exists()) {
             var content = pacmanConf.readText(Charsets.UTF_8)
-            content = content.replace(Regex("(?m)^\\s*CheckSpace\\b"), "#CheckSpace")
-            content = content.replace(Regex("(?m)^\\s*SandboxUser\\b.*"), "#SandboxUser = alpm")
-            content = content.replace(Regex("(?m)^\\s*#\\s*DisableSandbox\\b.*"), "DisableSandbox")
+            content = content
+                .replace(Regex("(?m)^\\s*CheckSpace\\b"), "#CheckSpace")
+                .replace(Regex("(?m)^\\s*SandboxUser\\b.*"), "#SandboxUser = alpm")
+                .replace(Regex("(?m)^\\s*#\\s*DisableSandbox\\b.*"), "DisableSandbox")
             if (!Regex("(?m)^\\s*DisableSandbox\\b").containsMatchIn(content)) {
                 content = if (content.contains("[options]")) {
                     content.replaceFirst("[options]", "[options]\nDisableSandbox")
@@ -440,73 +416,37 @@ class RootfsInstaller(
             }
             pacmanConf.writeText(content, Charsets.UTF_8)
             runCatching { Os.chmod(pacmanConf.path, 420) }
-        } else {
-            pacmanConf.writeText(
-                """
-                [options]
-                HoldPkg     = pacman glibc
-                Architecture = aarch64
-                DisableSandbox
-                #CheckSpace
-                SigLevel    = Required DatabaseOptional
-                LocalFileSigLevel = Optional
-
-                [core]
-                Include = /etc/pacman.d/mirrorlist
-
-                [extra]
-                Include = /etc/pacman.d/mirrorlist
-                """.trimIndent() + "\n",
-                Charsets.UTF_8
-            )
-            runCatching { Os.chmod(pacmanConf.path, 420) }
         }
 
-        // 4. /root/.hushlogin, /root/.bash_profile & /root/.bashrc
+        val mirrorlist = File(etcDir, "pacman.d/mirrorlist")
+        mirrorlist.parentFile?.mkdirs()
+        mirrorlist.writeText(
+            "Server = http://mirror.archlinuxarm.org/\$arch/\$repo\n" +
+                    "Server = https://mirrors.dotsrc.org/archlinuxarm/\$arch/\$repo\n",
+            Charsets.UTF_8
+        )
+        runCatching { Os.chmod(mirrorlist.path, 420) }
+
         val rootHome = File(rootfsDir, "root").apply { mkdirs() }
         runCatching { Os.chmod(rootHome.path, 493) }
+        File(rootHome, ".hushlogin").writeText("", Charsets.UTF_8)
 
-        val hushLogin = File(rootHome, ".hushlogin")
-        if (!hushLogin.exists()) {
-            hushLogin.writeText("", Charsets.UTF_8)
-            runCatching { Os.chmod(hushLogin.path, 420) }
-        }
-
-        val bashProfile = File(rootHome, ".bash_profile")
-        bashProfile.writeText(
+        File(rootHome, ".bash_profile").writeText(
             """
-            # /root/.bash_profile - Sumi Terminal (墨) Arch Linux ARM64
             export HOME=/root
+            export USER=root
             export TERM=xterm-256color
             export COLORTERM=truecolor
             export LANG=C.UTF-8
             export LC_ALL=C.UTF-8
             export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
             export PS1='root@arch:\w# '
-
             if [ -f ~/.bashrc ]; then
                 . ~/.bashrc
             fi
             """.trimIndent() + "\n",
             Charsets.UTF_8
         )
-        runCatching { Os.chmod(bashProfile.path, 420) }
-
-        val bashrc = File(rootHome, ".bashrc")
-        bashrc.writeText(
-            """
-            export PS1='root@arch:\w# '
-            alias ls='ls --color=auto'
-            alias ll='ls -la --color=auto'
-            """.trimIndent() + "\n",
-            Charsets.UTF_8
-        )
-        runCatching { Os.chmod(bashrc.path, 420) }
-
-        // Ensure /tmp exists with 0777 inside rootfs
-        val tmpDir = File(rootfsDir, "tmp").apply { mkdirs() }
-        runCatching { Os.chmod(tmpDir.path, 511) }
-
-        onLog("[✓] Pós-configuração concluída (/etc/resolv.conf, locale.conf, pacman.conf DisableSandbox, .hushlogin, .bash_profile).")
+        onLog("Configuração pós-extração do Arch Linux ARM64 aplicada.")
     }
 }

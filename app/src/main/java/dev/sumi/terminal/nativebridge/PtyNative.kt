@@ -116,7 +116,12 @@ object PtyNative {
         return processSessions[handle]?.readerTid?.get() ?: 0
     }
 
-    private fun wrapRawFd(fd: Int): FileDescriptor {
+    private data class WrappedFd(
+        val fdObj: FileDescriptor,
+        val parcelOwner: ParcelFileDescriptor?
+    )
+
+    private fun wrapRawFd(fd: Int): WrappedFd {
         val fdObj = FileDescriptor()
         val setReflectively = runCatching {
             val field = try {
@@ -125,14 +130,15 @@ object PtyNative {
                 FileDescriptor::class.java.getDeclaredField("fd")
             }
             field.isAccessible = true
-            field.set(fdObj, fd)
+            field.setInt(fdObj, fd)
             true
         }.getOrDefault(false)
 
         if (!setReflectively) {
-            return ParcelFileDescriptor.adoptFd(fd).fileDescriptor
+            val pfd = ParcelFileDescriptor.adoptFd(fd)
+            return WrappedFd(fdObj = pfd.fileDescriptor, parcelOwner = pfd)
         }
-        return fdObj
+        return WrappedFd(fdObj = fdObj, parcelOwner = null)
     }
 
     private class NativeTermuxPtySession(
@@ -142,9 +148,14 @@ object PtyNative {
     ) {
         val readerTid = AtomicInteger(0)
         private val running = AtomicBoolean(true)
-        private val fdObj: FileDescriptor = wrapRawFd(ptmFd)
-        private val inputStream = FileInputStream(fdObj)
-        private val outputStream = FileOutputStream(fdObj)
+        private val wrapped: WrappedFd = wrapRawFd(ptmFd)
+        private val inputStream = FileInputStream(wrapped.fdObj)
+        private val outputStream = FileOutputStream(wrapped.fdObj)
+
+        private fun safeClosePtyFd() {
+            runCatching { wrapped.parcelOwner?.detachFd() }
+            runCatching { JNI.close(ptmFd) }
+        }
 
         fun start() {
             thread(name = "pty-reader-$childPid", isDaemon = true) {
@@ -167,7 +178,7 @@ object PtyNative {
                 } finally {
                     val exitCode = runCatching { JNI.waitFor(childPid) }.getOrDefault(0)
                     if (running.compareAndSet(true, false)) {
-                        runCatching { JNI.close(ptmFd) }
+                        safeClosePtyFd()
                     }
                     listener.onExit(exitCode)
                 }
@@ -196,7 +207,7 @@ object PtyNative {
             if (running.compareAndSet(true, false)) {
                 runCatching { Os.kill(-childPid, sig) }
                 runCatching { Os.kill(childPid, sig) }
-                runCatching { JNI.close(ptmFd) }
+                safeClosePtyFd()
             }
         }
     }

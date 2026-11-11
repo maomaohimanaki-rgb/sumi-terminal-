@@ -59,6 +59,10 @@ class TerminalViewModel(
         sessionManager.ensureDefaultSession()
     }
 
+    private fun activeOrEnsureSession(): TerminalSession {
+        return sessionManager.getActiveSession() ?: sessionManager.ensureDefaultSession()
+    }
+
     fun selectTab(id: String) {
         _selection.value = null
         sessionManager.selectSession(id)
@@ -95,20 +99,20 @@ class TerminalViewModel(
     }
 
     fun sendKey(key: TermKey) {
-        val active = sessionManager.getActiveSession() ?: return
+        val active = activeOrEnsureSession()
         val bytes = KeyEncoder.encode(key, consumeMods())
         active.write(bytes)
     }
 
     fun sendRawText(text: String) {
         if (text.isEmpty()) return
-        val active = sessionManager.getActiveSession() ?: return
+        val active = activeOrEnsureSession()
         val bytes = KeyEncoder.encodeText(text, consumeMods())
         active.write(bytes)
     }
 
     fun sendBytes(bytes: ByteArray) {
-        val active = sessionManager.getActiveSession() ?: return
+        val active = activeOrEnsureSession()
         active.write(bytes)
     }
 
@@ -121,12 +125,12 @@ class TerminalViewModel(
     }
 
     fun cdToDirectory(dir: File) {
-        val active = sessionManager.getActiveSession() ?: return
+        val active = activeOrEnsureSession()
         active.write(("cd \"${dir.absolutePath}\" && ls -la\r").toByteArray(Charsets.UTF_8))
     }
 
     fun runScriptFile(file: File) {
-        val active = sessionManager.getActiveSession() ?: return
+        val active = activeOrEnsureSession()
         val command = when (file.extension.lowercase()) {
             "rs" -> "cargo run"
             "sh", "bash" -> "bash \"${file.absolutePath}\""
@@ -148,7 +152,7 @@ class TerminalViewModel(
     fun confirmSafePaste(editedText: String, bracketed: Boolean) {
         _pendingSafePaste.value = null
         if (editedText.isEmpty()) return
-        val active = sessionManager.getActiveSession() ?: return
+        val active = activeOrEnsureSession()
         val payload = KeyEncoder.wrapBracketedPaste(editedText, bracketed)
         active.write(payload)
     }
@@ -162,7 +166,7 @@ class TerminalViewModel(
     }
 
     fun selectAll() {
-        val active = sessionManager.getActiveSession() ?: return
+        val active = activeOrEnsureSession()
         _selection.value = active.buffer.selectAll()
     }
 

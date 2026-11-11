@@ -2,19 +2,21 @@ package dev.sumi.terminal.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -22,13 +24,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.example.R
 import dev.sumi.terminal.ui.theme.Sumi
 
 @Composable
@@ -37,132 +43,151 @@ fun PasteConfirmDialog(
     onConfirm: (editedText: String, bracketed: Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var editableText by remember(text) {
-        mutableStateOf(text.replace("\r\n", "\n").replace('\r', '\n'))
-    }
-
-    val lineCount = remember(editableText) {
-        if (editableText.isEmpty()) 0 else editableText.count { it == '\n' } + 1
-    }
-    val isMultiLine = lineCount > 1
-    val hasDangerCommand = remember(editableText) {
-        editableText.contains("rm -rf") || editableText.contains("mkfs") || editableText.contains("dd if=")
+    var editedText by remember(text) { mutableStateOf(text) }
+    val lineCount = remember(editedText) { editedText.lines().size }
+    val hasDangerCommand = remember(editedText) {
+        val lower = editedText.lowercase()
+        lower.contains("rm -rf") || lower.contains("mkfs") || lower.contains("dd if=") || lower.contains(":(){")
     }
 
     Dialog(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Sumi.Sumi2, RoundedCornerShape(14.dp))
-                .border(Sumi.HairlineWidth, Sumi.Hairline, RoundedCornerShape(14.dp))
-                .padding(20.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(Sumi.Sumi2)
+                .border(
+                    width = 1.dp,
+                    color = if (hasDangerCommand) Sumi.Kurenai else Sumi.Hairline,
+                    shape = RoundedCornerShape(14.dp)
+                )
+                .padding(18.dp)
                 .testTag("paste_confirm_dialog"),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    modifier = Modifier
-                        .background(
-                            color = if (hasDangerCommand) Sumi.Kurenai.copy(alpha = 0.18f) else Sumi.Kinari.copy(alpha = 0.14f),
-                            shape = RoundedCornerShape(6.dp)
-                        )
-                        .padding(horizontal = 8.dp, vertical = 3.dp)
-                ) {
-                    Text(
-                        text = if (hasDangerCommand) "ATENÇÃO" else "SAFE PASTE",
-                        color = if (hasDangerCommand) Sumi.Kurenai else Sumi.Kinari,
-                        fontFamily = Sumi.Mono,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 10.sp
-                    )
-                }
                 Text(
-                    text = "Revisar e Editar Colagem",
-                    color = Sumi.Paper,
+                    text = stringResource(R.string.paste_confirm_title),
+                    color = if (hasDangerCommand) Sumi.Kurenai else Sumi.Paper,
                     fontFamily = Sumi.Sans,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 16.sp
+                    fontSize = 15.sp
+                )
+                Text(
+                    text = "$lineCount linha(s) • ${editedText.length} chars",
+                    color = Sumi.Muted,
+                    fontFamily = Sumi.Mono,
+                    fontSize = 11.sp
                 )
             }
 
-            Text(
-                text = "Edite o comando livremente abaixo antes de enviá-lo ao terminal ($lineCount linha(s), ${editableText.length} caracteres).",
-                color = Sumi.Muted,
-                fontFamily = Sumi.Sans,
-                fontSize = 12.sp,
-                lineHeight = 17.sp
-            )
+            if (hasDangerCommand) {
+                Text(
+                    text = "Atenção: Comando potencialmente destrutivo detectado. Revise antes de colar.",
+                    color = Sumi.Kurenai,
+                    fontFamily = Sumi.Sans,
+                    fontSize = 11.sp
+                )
+            }
 
-            Box(
+            OutlinedTextField(
+                value = editedText,
+                onValueChange = { editedText = it },
+                textStyle = TextStyle(
+                    color = Sumi.Shironeri,
+                    fontFamily = Sumi.Mono,
+                    fontSize = 12.sp
+                ),
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.None,
+                    autoCorrectEnabled = false,
+                    keyboardType = KeyboardType.Text
+                ),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = Sumi.Kinari,
+                    unfocusedBorderColor = Sumi.Hairline,
+                    focusedContainerColor = Sumi.Sumi1,
+                    unfocusedContainerColor = Sumi.Sumi1,
+                    cursorColor = Sumi.Kinari
+                ),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 84.dp, max = 240.dp)
-                    .background(Sumi.Sumi1, RoundedCornerShape(8.dp))
-                    .border(
-                        width = 1.dp,
-                        color = if (hasDangerCommand) Sumi.Kurenai.copy(alpha = 0.7f) else Sumi.Kinari.copy(alpha = 0.45f),
-                        shape = RoundedCornerShape(8.dp)
-                    )
-                    .padding(12.dp)
-            ) {
-                BasicTextField(
-                    value = editableText,
-                    onValueChange = { editableText = it },
-                    textStyle = TextStyle(
-                        color = Sumi.Shironeri,
-                        fontFamily = Sumi.Mono,
-                        fontSize = 13.sp,
-                        lineHeight = 19.sp
-                    ),
-                    cursorBrush = SolidColor(Sumi.Kinari),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("paste_editable_input"),
-                    decorationBox = { innerTextField ->
-                        if (editableText.isEmpty()) {
-                            Text(
-                                text = "Digite ou edite o comando para colar...",
-                                color = Sumi.Muted,
-                                fontFamily = Sumi.Mono,
-                                fontSize = 13.sp
-                            )
-                        }
-                        innerTextField()
-                    }
-                )
-            }
+                    .heightIn(min = 100.dp, max = 220.dp)
+                    .testTag("paste_edit_field")
+            )
+
+            Spacer(Modifier.height(2.dp))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                TextButton(
-                    onClick = onDismiss,
-                    modifier = Modifier.testTag("paste_cancel_button")
-                ) {
-                    Text("Cancelar", color = Sumi.Muted, fontFamily = Sumi.Mono)
-                }
-                Spacer(Modifier.width(8.dp))
-                TextButton(
-                    onClick = {
-                        if (editableText.isNotEmpty()) {
-                            onConfirm(editableText, isMultiLine || editableText.length > 80)
-                        } else {
-                            onDismiss()
-                        }
-                    },
-                    enabled = editableText.isNotEmpty(),
-                    modifier = Modifier.testTag("paste_confirm_button")
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Sumi.Sumi3)
+                        .border(Sumi.HairlineWidth, Sumi.Hairline, RoundedCornerShape(8.dp))
+                        .clickable { onDismiss() }
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .testTag("paste_cancel_button")
                 ) {
                     Text(
-                        text = if (isMultiLine) "Colar Bloco Editado" else "Confirmar e Colar",
-                        color = if (editableText.isNotEmpty()) Sumi.Kinari else Sumi.Muted,
+                        text = stringResource(R.string.paste_cancel),
+                        color = Sumi.Muted,
                         fontFamily = Sumi.Mono,
-                        fontWeight = FontWeight.Bold
+                        fontSize = 11.sp
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Sumi.Sumi3)
+                        .border(Sumi.HairlineWidth, Sumi.Kinari.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                        .clickable {
+                            if (editedText.isNotEmpty()) {
+                                onConfirm(editedText, false)
+                            } else {
+                                onDismiss()
+                            }
+                        }
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .testTag("paste_raw_button")
+                ) {
+                    Text(
+                        text = stringResource(R.string.paste_simple),
+                        color = Sumi.Kinari,
+                        fontFamily = Sumi.Mono,
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 11.sp
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Sumi.Kinari)
+                        .clickable {
+                            if (editedText.isNotEmpty()) {
+                                onConfirm(editedText, true)
+                            } else {
+                                onDismiss()
+                            }
+                        }
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .testTag("paste_bracketed_button")
+                ) {
+                    Text(
+                        text = stringResource(R.string.paste_block),
+                        color = Sumi.Sumi1,
+                        fontFamily = Sumi.Mono,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp
                     )
                 }
             }
