@@ -100,6 +100,16 @@ class TerminalViewModel(
 
     fun sendKey(key: TermKey) {
         val active = activeOrEnsureSession()
+        if (key == TermKey.PGUP && !active.buffer.isAltScreen) {
+            val halfPage = (active.buffer.rows / 2).coerceAtLeast(1)
+            active.scrollBy(halfPage)
+            return
+        }
+        if (key == TermKey.PGDN && !active.buffer.isAltScreen) {
+            val halfPage = (active.buffer.rows / 2).coerceAtLeast(1)
+            active.scrollBy(-halfPage)
+            return
+        }
         val bytes = KeyEncoder.encode(key, consumeMods())
         active.write(bytes)
     }

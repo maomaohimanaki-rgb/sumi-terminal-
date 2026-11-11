@@ -15,9 +15,9 @@ android {
   defaultConfig {
     applicationId = "com.aistudio.sumiterminal.kxzpqm"
     minSdk = 24
-    targetSdk = 30
-    versionCode = 2
-    versionName = "2.0-zen"
+    targetSdk = 33
+    versionCode = 3
+    versionName = "2.1-zen"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

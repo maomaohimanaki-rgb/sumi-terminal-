@@ -47,10 +47,30 @@ class TerminalSession(
     private val _renderTick = MutableStateFlow(0L)
     val renderTick: StateFlow<Long> = _renderTick.asStateFlow()
 
+    private val _scrollOffset = MutableStateFlow(0)
+    val scrollOffset: StateFlow<Int> = _scrollOffset.asStateFlow()
+
     private var nativeHandle: Long = 0L
     private var readerTid: Int = 0
     private var resizeDebounceJob: Job? = null
     private var lastFrameEmitMs: Long = 0L
+
+    fun scrollBy(deltaLines: Int) {
+        val maxScroll = buffer.historySize
+        val current = _scrollOffset.value
+        val target = (current + deltaLines).coerceIn(0, maxScroll)
+        if (target != current) {
+            _scrollOffset.value = target
+            _renderTick.value = System.nanoTime()
+        }
+    }
+
+    fun scrollToBottom() {
+        if (_scrollOffset.value != 0) {
+            _scrollOffset.value = 0
+            _renderTick.value = System.nanoTime()
+        }
+    }
 
     fun start() {
         if (nativeHandle != 0L) return
@@ -72,6 +92,7 @@ class TerminalSession(
 
     fun write(bytes: ByteArray) {
         if (nativeHandle == 0L || !_isAlive.value) return
+        scrollToBottom()
         PtyNative.writeSession(nativeHandle, bytes)
     }
 

@@ -78,6 +78,13 @@ class TerminalBuffer(
     val versionCounter: Long
         get() = lock.withLock { _versionCounter }
 
+    private var _isAltScreen: Boolean = false
+    val isAltScreen: Boolean
+        get() = lock.withLock { _isAltScreen }
+
+    val historySize: Int
+        get() = lock.withLock { history.size }
+
     val totalLines: Int
         get() = lock.withLock { history.size + _rows }
 
@@ -313,6 +320,20 @@ class TerminalBuffer(
                     }
                 }
             }
+            'h' -> {
+                if (paramsRaw.startsWith("?")) {
+                    if (1049 in parts || 47 in parts || 1047 in parts) {
+                        _isAltScreen = true
+                    }
+                }
+            }
+            'l' -> {
+                if (paramsRaw.startsWith("?")) {
+                    if (1049 in parts || 47 in parts || 1047 in parts) {
+                        _isAltScreen = false
+                    }
+                }
+            }
         }
     }
 
@@ -385,18 +406,30 @@ class TerminalBuffer(
 
     fun snapshotScreen(
         palette: WabiSabiPalette,
-        autoCommandColors: Boolean
+        autoCommandColors: Boolean,
+        scrollOffset: Int = 0
     ): Pair<List<Array<TermCell>>, Pair<Int, Int>> = lock.withLock {
         val out = ArrayList<Array<TermCell>>(_rows)
+        val histSize = history.size
+        val clampedOffset = scrollOffset.coerceIn(0, histSize)
+        val startIndex = histSize - clampedOffset
+
         for (r in 0 until _rows) {
-            val lineObj = screen.getOrNull(r) ?: TerminalLine(_cols)
+            val absIdx = startIndex + r
+            val lineObj = if (absIdx < histSize) {
+                history.getOrNull(absIdx) ?: TerminalLine(_cols)
+            } else {
+                val screenIdx = absIdx - histSize
+                screen.getOrNull(screenIdx) ?: TerminalLine(_cols)
+            }
             val rawCells = Array(_cols) { c -> lineObj.cells.getOrNull(c) ?: TermCell() }
             if (autoCommandColors) {
                 applySemanticColoring(rawCells, palette)
             }
             out.add(rawCells)
         }
-        out to (_curRow.coerceIn(0, _rows - 1) to _curCol.coerceIn(0, _cols - 1))
+        val visualCurRow = _curRow + clampedOffset
+        out to (visualCurRow to _curCol.coerceIn(0, _cols - 1))
     }
 
     private fun applySemanticColoring(cells: Array<TermCell>, palette: WabiSabiPalette) {

@@ -399,7 +399,7 @@ class RootfsInstaller(
             runCatching { Os.chmod(hosts.path, 420) }
         }
 
-        // Configure /etc/pacman.conf for PRoot (DisableSandbox, #CheckSpace, #SandboxUser)
+        // Configure /etc/pacman.conf for PRoot (DisableSandbox, #CheckSpace, #SandboxUser, SigLevel = Never)
         val pacmanConf = File(etcDir, "pacman.conf")
         if (pacmanConf.exists()) {
             var content = pacmanConf.readText(Charsets.UTF_8)
@@ -407,16 +407,27 @@ class RootfsInstaller(
                 .replace(Regex("(?m)^\\s*CheckSpace\\b"), "#CheckSpace")
                 .replace(Regex("(?m)^\\s*SandboxUser\\b.*"), "#SandboxUser = alpm")
                 .replace(Regex("(?m)^\\s*#\\s*DisableSandbox\\b.*"), "DisableSandbox")
+                .replace(Regex("(?m)^\\s*#?\\s*SigLevel\\b.*"), "SigLevel = Never")
+                .replace(Regex("(?m)^\\s*#?\\s*LocalFileSigLevel\\b.*"), "LocalFileSigLevel = Optional")
             if (!Regex("(?m)^\\s*DisableSandbox\\b").containsMatchIn(content)) {
                 content = if (content.contains("[options]")) {
-                    content.replaceFirst("[options]", "[options]\nDisableSandbox")
+                    content.replaceFirst("[options]", "[options]\nDisableSandbox\nSigLevel = Never\nLocalFileSigLevel = Optional")
                 } else {
-                    "[options]\nDisableSandbox\n$content"
+                    "[options]\nDisableSandbox\nSigLevel = Never\nLocalFileSigLevel = Optional\n$content"
                 }
+            } else if (!Regex("(?m)^\\s*SigLevel\\s*=\\s*Never\\b").containsMatchIn(content)) {
+                content = content.replaceFirst("DisableSandbox", "DisableSandbox\nSigLevel = Never\nLocalFileSigLevel = Optional")
             }
             pacmanConf.writeText(content, Charsets.UTF_8)
             runCatching { Os.chmod(pacmanConf.path, 420) }
         }
+
+        // Initialize /etc/pacman.d/gnupg with 0700 permissions
+        val gnupgDir = File(etcDir, "pacman.d/gnupg")
+        if (!gnupgDir.exists()) {
+            gnupgDir.mkdirs()
+        }
+        runCatching { Os.chmod(gnupgDir.path, 448) } // 0700 = 448 in decimal
 
         val mirrorlist = File(etcDir, "pacman.d/mirrorlist")
         mirrorlist.parentFile?.mkdirs()

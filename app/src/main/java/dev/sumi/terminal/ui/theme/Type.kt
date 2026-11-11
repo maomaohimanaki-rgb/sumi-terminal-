@@ -8,20 +8,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import com.example.R
 
-object SumiFonts {
-    val Mono: FontFamily = try {
-        FontFamily(
-            Font(R.font.jetbrains_mono, FontWeight.Normal),
-            Font(R.font.jetbrains_mono, FontWeight.Medium),
-            Font(R.font.jetbrains_mono, FontWeight.Bold)
-        )
-    } catch (_: Throwable) {
-        FontFamily.Monospace
-    }
-
-    val Sans: FontFamily = FontFamily.SansSerif
-}
-
 val SumiTypography = Typography(
     bodyLarge = TextStyle(
         fontFamily = SumiFonts.Sans,
