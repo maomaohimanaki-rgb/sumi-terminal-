@@ -10,6 +10,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -33,6 +34,8 @@ class TerminalSession(
 ) : PtyListener {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val ioWriteScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val writeChannel = Channel<ByteArray>(Channel.UNLIMITED)
     val buffer = TerminalBuffer(initialRows = 36, initialCols = 80)
 
     private val _title = MutableStateFlow(initialTitle)
@@ -55,6 +58,38 @@ class TerminalSession(
     private var resizeDebounceJob: Job? = null
     private var lastFrameEmitMs: Long = 0L
 
+    init {
+        // Sequential background PTY writer: processes large pastes in 1024-byte UTF-8 safe blocks
+        // on Dispatchers.IO so 800+ line pastes never saturate the 4KB kernel PTY buffer or block the UI thread.
+        ioWriteScope.launch {
+            val chunkSize = 1024
+            for (payload in writeChannel) {
+                val handle = nativeHandle
+                if (handle == 0L || !_isAlive.value || payload.isEmpty()) continue
+
+                if (payload.size <= chunkSize) {
+                    PtyNative.writeSession(handle, payload)
+                } else {
+                    var offset = 0
+                    val total = payload.size
+                    while (offset < total && _isAlive.value) {
+                        var end = (offset + chunkSize).coerceAtMost(total)
+                        // Never split in the middle of a multi-byte UTF-8 character sequence (10xxxxxx)
+                        while (end < total && (payload[end].toInt() and 0xC0) == 0x80) {
+                            end++
+                        }
+                        val block = payload.copyOfRange(offset, end)
+                        PtyNative.writeSession(handle, block)
+                        offset = end
+                        if (offset < total) {
+                            delay(2L)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fun scrollBy(deltaLines: Int) {
         val maxScroll = buffer.historySize
         val current = _scrollOffset.value
@@ -72,6 +107,9 @@ class TerminalSession(
         }
     }
 
+    private var lastAppliedPtyRows: Int = -1
+    private var lastAppliedPtyCols: Int = -1
+
     fun start() {
         if (nativeHandle != 0L) return
         nativeHandle = PtyNative.startSession(
@@ -83,6 +121,11 @@ class TerminalSession(
             cols = buffer.cols,
             listener = this
         )
+        if (nativeHandle != 0L) {
+            lastAppliedPtyRows = buffer.rows
+            lastAppliedPtyCols = buffer.cols
+            PtyNative.resizeSession(nativeHandle, buffer.rows, buffer.cols)
+        }
         val tid = PtyNative.readerTid(nativeHandle)
         if (tid > 0) {
             readerTid = tid
@@ -91,33 +134,41 @@ class TerminalSession(
     }
 
     fun write(bytes: ByteArray) {
-        if (nativeHandle == 0L || !_isAlive.value) return
+        if (nativeHandle == 0L || !_isAlive.value || bytes.isEmpty()) return
         scrollToBottom()
-        PtyNative.writeSession(nativeHandle, bytes)
+        writeChannel.trySend(bytes)
     }
 
     /**
-     * Debounces TIOCSWINSZ resize events during keyboard animations (120ms settle window)
-     * so bash Readline never corrupts multiline cursor matrices.
+     * Debounces TIOCSWINSZ resize events during keyboard animations (80ms settle window)
+     * and deterministically dispatches SIGWINCH to both buffer and active PTY.
      */
     fun requestResizeDebounced(rows: Int, cols: Int) {
         val clampedRows = rows.coerceIn(6, 200)
         val clampedCols = cols.coerceIn(20, 300)
-        if (clampedRows == buffer.rows && clampedCols == buffer.cols) return
+        val bufferMatches = (clampedRows == buffer.rows && clampedCols == buffer.cols)
+        val ptyMatches = (clampedRows == lastAppliedPtyRows && clampedCols == lastAppliedPtyCols)
+        if (bufferMatches && ptyMatches) return
 
         resizeDebounceJob?.cancel()
         resizeDebounceJob = scope.launch {
-            delay(120L)
+            delay(80L)
             buffer.resize(clampedRows, clampedCols)
             if (nativeHandle != 0L && _isAlive.value) {
                 PtyNative.resizeSession(nativeHandle, clampedRows, clampedCols)
+                lastAppliedPtyRows = clampedRows
+                lastAppliedPtyCols = clampedCols
             }
             _renderTick.value = System.nanoTime()
         }
     }
 
+    private var pendingFrameJob: Job? = null
+
     fun close() {
         resizeDebounceJob?.cancel()
+        pendingFrameJob?.cancel()
+        writeChannel.close()
         if (readerTid > 0) {
             performanceManager.detachReaderThread(readerTid)
             readerTid = 0
@@ -135,15 +186,19 @@ class TerminalSession(
         val durationNs = System.nanoTime() - startNs
         performanceManager.reportWorkDuration(durationNs)
 
-        // Respect ADPF thermal frame interval throttling (16ms / 33ms / 50ms / 100ms / 250ms)
+        // Coalesce frame ticks so burst output (e.g. 800-line paste echo) never floods recompositions
         val nowMs = System.currentTimeMillis()
-        val minIntervalMs = performanceManager.frameIntervalMs.value
+        val minIntervalMs = performanceManager.frameIntervalMs.value.coerceAtLeast(16L)
         if (nowMs - lastFrameEmitMs >= minIntervalMs) {
             lastFrameEmitMs = nowMs
+            pendingFrameJob?.cancel()
+            pendingFrameJob = null
             _renderTick.value = System.nanoTime()
-        } else {
-            scope.launch {
-                delay(minIntervalMs)
+        } else if (pendingFrameJob?.isActive != true) {
+            val waitMs = (minIntervalMs - (nowMs - lastFrameEmitMs)).coerceAtLeast(8L)
+            pendingFrameJob = scope.launch {
+                delay(waitMs)
+                lastFrameEmitMs = System.currentTimeMillis()
                 _renderTick.value = System.nanoTime()
             }
         }

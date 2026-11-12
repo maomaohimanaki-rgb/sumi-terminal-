@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.OutlinedTextField
@@ -43,10 +45,24 @@ fun PasteConfirmDialog(
     onConfirm: (editedText: String, bracketed: Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
+    // For massive pastes (> 3,500 chars or > 80 lines, e.g., 800-line scripts), avoid feeding the entire
+    // buffer into a single OutlinedTextField paragraph layout (which blocks the Android UI thread and causes ANRs).
+    // Instead, render a virtualized LazyColumn preview and transmit the 100% unmodified text in background blocks.
+    val isLargeBuffer = remember(text) { text.length > 3_500 || text.count { it == '\n' } > 80 }
     var editedText by remember(text) { mutableStateOf(text) }
-    val lineCount = remember(editedText) { editedText.lines().size }
-    val hasDangerCommand = remember(editedText) {
-        val lower = editedText.lowercase()
+    val previewLines = remember(text, isLargeBuffer) {
+        if (isLargeBuffer) text.split('\n') else emptyList()
+    }
+    val lineCount = remember(editedText, isLargeBuffer, previewLines) {
+        if (isLargeBuffer) previewLines.size else editedText.count { it == '\n' } + 1
+    }
+    val hasDangerCommand = remember(editedText, isLargeBuffer) {
+        val sample = if (isLargeBuffer && editedText.length > 8_000) {
+            editedText.substring(0, 4_000) + "\n" + editedText.substring(editedText.length - 4_000)
+        } else {
+            editedText
+        }
+        val lower = sample.lowercase()
         lower.contains("rm -rf") || lower.contains("mkfs") || lower.contains("dd if=") || lower.contains(":(){")
     }
 
@@ -94,31 +110,55 @@ fun PasteConfirmDialog(
                 )
             }
 
-            OutlinedTextField(
-                value = editedText,
-                onValueChange = { editedText = it },
-                textStyle = TextStyle(
-                    color = Sumi.Shironeri,
-                    fontFamily = Sumi.Mono,
-                    fontSize = 12.sp
-                ),
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.None,
-                    autoCorrectEnabled = false,
-                    keyboardType = KeyboardType.Text
-                ),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Sumi.Kinari,
-                    unfocusedBorderColor = Sumi.Hairline,
-                    focusedContainerColor = Sumi.Sumi1,
-                    unfocusedContainerColor = Sumi.Sumi1,
-                    cursorColor = Sumi.Kinari
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 100.dp, max = 220.dp)
-                    .testTag("paste_edit_field")
-            )
+            if (isLargeBuffer) {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 100.dp, max = 220.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Sumi.Sumi1)
+                        .border(1.dp, Sumi.Hairline, RoundedCornerShape(8.dp))
+                        .padding(10.dp)
+                        .testTag("paste_edit_field"),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    itemsIndexed(previewLines) { idx, line ->
+                        Text(
+                            text = if (line.length > 240) line.take(240) + "…" else line,
+                            color = Sumi.Shironeri,
+                            fontFamily = Sumi.Mono,
+                            fontSize = 11.sp,
+                            maxLines = 2
+                        )
+                    }
+                }
+            } else {
+                OutlinedTextField(
+                    value = editedText,
+                    onValueChange = { editedText = it },
+                    textStyle = TextStyle(
+                        color = Sumi.Shironeri,
+                        fontFamily = Sumi.Mono,
+                        fontSize = 12.sp
+                    ),
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.None,
+                        autoCorrectEnabled = false,
+                        keyboardType = KeyboardType.Text
+                    ),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Sumi.Kinari,
+                        unfocusedBorderColor = Sumi.Hairline,
+                        focusedContainerColor = Sumi.Sumi1,
+                        unfocusedContainerColor = Sumi.Sumi1,
+                        cursorColor = Sumi.Kinari
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 100.dp, max = 220.dp)
+                        .testTag("paste_edit_field")
+                )
+            }
 
             Spacer(Modifier.height(2.dp))
 

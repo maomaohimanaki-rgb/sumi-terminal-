@@ -69,6 +69,9 @@ class TerminalBuffer(
     private var currentBg: Color? = null
     private var currentBold: Boolean = false
     private var currentUnderline: Boolean = false
+    private var currentInverse: Boolean = false
+    private var savedRow: Int = 0
+    private var savedCol: Int = 0
 
     // CSI parser state
     private var parserState = ParserState.NORMAL
@@ -103,12 +106,22 @@ class TerminalBuffer(
         }
     }
 
-    fun appendBytes(bytes: ByteArray, palette: WabiSabiPalette): Unit = lock.withLock {
+    fun appendBytes(bytes: ByteArray, palette: WabiSabiPalette) {
+        if (bytes.isEmpty()) return
         val text = bytes.toString(Charsets.UTF_8)
-        for (ch in text) {
-            processChar(ch, palette)
+        val total = text.length
+        val blockLen = 1024
+        var offset = 0
+        while (offset < total) {
+            val end = (offset + blockLen).coerceAtMost(total)
+            lock.withLock {
+                for (i in offset until end) {
+                    processChar(text[i], palette)
+                }
+                _versionCounter++
+            }
+            offset = end
         }
-        _versionCounter++
     }
 
     private fun safeScreenLine(row: Int): TerminalLine {
@@ -118,13 +131,17 @@ class TerminalBuffer(
         }
     }
 
+    private fun isZeroWidthOrVariationSelector(code: Int): Boolean {
+        return code in 0xFE00..0xFE0F || code in 0x200B..0x200D || code == 0xFEFF
+    }
+
     private fun processChar(ch: Char, palette: WabiSabiPalette) {
         when (parserState) {
             ParserState.NORMAL -> {
                 when (ch) {
                     AnsiConstants.ESC -> parserState = ParserState.ESCAPE
                     AnsiConstants.CR -> _curCol = 0
-                    AnsiConstants.LF -> {
+                    AnsiConstants.LF, '\u000B', '\u000C' -> {
                         _curCol = 0
                         lineFeed()
                     }
@@ -132,12 +149,13 @@ class TerminalBuffer(
                     AnsiConstants.TAB -> {
                         val nextStop = ((_curCol / 4) + 1) * 4
                         while (_curCol < nextStop && _curCol < _cols) {
-                            putChar(' ')
+                            putChar(' ', palette)
                         }
                     }
                     else -> {
-                        if (ch.code >= 32) {
-                            putChar(ch)
+                        val code = ch.code
+                        if (code >= 32 && !isZeroWidthOrVariationSelector(code)) {
+                            putChar(ch, palette)
                         }
                     }
                 }
@@ -151,6 +169,20 @@ class TerminalBuffer(
                     ']' -> {
                         csiBuffer.clear()
                         parserState = ParserState.OSC
+                    }
+                    '7' -> {
+                        savedRow = _curRow
+                        savedCol = _curCol
+                        parserState = ParserState.NORMAL
+                    }
+                    '8' -> {
+                        _curRow = savedRow.coerceIn(0, _rows - 1)
+                        _curCol = savedCol.coerceIn(0, _cols - 1)
+                        parserState = ParserState.NORMAL
+                    }
+                    'M' -> {
+                        if (_curRow > 0) _curRow--
+                        parserState = ParserState.NORMAL
                     }
                     'c' -> {
                         resetScreen()
@@ -200,7 +232,7 @@ class TerminalBuffer(
         }
     }
 
-    private fun putChar(ch: Char) {
+    private fun putChar(ch: Char, palette: WabiSabiPalette) {
         if (_curCol >= _cols) {
             safeScreenLine(_curRow).softWrapped = true
             _curCol = 0
@@ -208,10 +240,12 @@ class TerminalBuffer(
         }
         val line = safeScreenLine(_curRow)
         if (_curCol in line.cells.indices) {
+            val effectiveFg = if (currentInverse) (currentBg ?: palette.background) else currentFg
+            val effectiveBg = if (currentInverse) (currentFg ?: palette.foreground) else currentBg
             line.cells[_curCol] = TermCell(
                 char = ch,
-                fgColor = currentFg,
-                bgColor = currentBg,
+                fgColor = effectiveFg,
+                bgColor = effectiveBg,
                 bold = currentBold,
                 underline = currentUnderline
             )
@@ -244,33 +278,42 @@ class TerminalBuffer(
         currentBg = null
         currentBold = false
         currentUnderline = false
+        currentInverse = false
     }
 
     private fun handleCsi(paramsRaw: String, finalChar: Char, palette: WabiSabiPalette) {
-        val clean = paramsRaw.removePrefix("?")
+        val clean = paramsRaw.removePrefix("?").removePrefix(">")
         val parts = if (clean.isEmpty()) emptyList() else clean.split(';').map { it.toIntOrNull() ?: 0 }
         when (finalChar) {
             'm' -> handleSgr(parts, palette)
             'H', 'f' -> {
-                val r = (parts.getOrNull(0) ?: 1).coerceIn(1, _rows) - 1
-                val c = (parts.getOrNull(1) ?: 1).coerceIn(1, _cols) - 1
+                val r = (parts.getOrNull(0)?.takeIf { it > 0 } ?: 1).coerceIn(1, _rows) - 1
+                val c = (parts.getOrNull(1)?.takeIf { it > 0 } ?: 1).coerceIn(1, _cols) - 1
                 _curRow = r
                 _curCol = c
             }
+            'G', '`' -> {
+                val c = (parts.firstOrNull()?.takeIf { it > 0 } ?: 1).coerceIn(1, _cols) - 1
+                _curCol = c
+            }
+            'd' -> {
+                val r = (parts.firstOrNull()?.takeIf { it > 0 } ?: 1).coerceIn(1, _rows) - 1
+                _curRow = r
+            }
             'A' -> {
-                val n = (parts.firstOrNull() ?: 1).coerceAtLeast(1)
+                val n = (parts.firstOrNull()?.takeIf { it > 0 } ?: 1)
                 _curRow = (_curRow - n).coerceAtLeast(0)
             }
-            'B' -> {
-                val n = (parts.firstOrNull() ?: 1).coerceAtLeast(1)
+            'B', 'e' -> {
+                val n = (parts.firstOrNull()?.takeIf { it > 0 } ?: 1)
                 _curRow = (_curRow + n).coerceAtMost(_rows - 1)
             }
-            'C' -> {
-                val n = (parts.firstOrNull() ?: 1).coerceAtLeast(1)
+            'C', 'a' -> {
+                val n = (parts.firstOrNull()?.takeIf { it > 0 } ?: 1)
                 _curCol = (_curCol + n).coerceAtMost(_cols - 1)
             }
             'D' -> {
-                val n = (parts.firstOrNull() ?: 1).coerceAtLeast(1)
+                val n = (parts.firstOrNull()?.takeIf { it > 0 } ?: 1)
                 if (_curCol - n >= 0) {
                     _curCol -= n
                 } else if (_curRow > 0 && screen.getOrNull(_curRow - 1)?.softWrapped == true) {
@@ -279,6 +322,53 @@ class TerminalBuffer(
                     _curCol = (_cols - rem).coerceIn(0, _cols - 1)
                 } else {
                     _curCol = 0
+                }
+            }
+            'E' -> {
+                val n = (parts.firstOrNull()?.takeIf { it > 0 } ?: 1)
+                _curRow = (_curRow + n).coerceAtMost(_rows - 1)
+                _curCol = 0
+            }
+            'F' -> {
+                val n = (parts.firstOrNull()?.takeIf { it > 0 } ?: 1)
+                _curRow = (_curRow - n).coerceAtLeast(0)
+                _curCol = 0
+            }
+            's' -> {
+                if (!paramsRaw.startsWith("?")) {
+                    savedRow = _curRow
+                    savedCol = _curCol
+                }
+            }
+            'u' -> {
+                _curRow = savedRow.coerceIn(0, _rows - 1)
+                _curCol = savedCol.coerceIn(0, _cols - 1)
+            }
+            'P' -> {
+                val n = (parts.firstOrNull()?.takeIf { it > 0 } ?: 1).coerceAtMost(_cols - _curCol)
+                val line = safeScreenLine(_curRow)
+                for (c in _curCol until (_cols - n)) {
+                    line.cells[c] = line.cells.getOrNull(c + n) ?: TermCell()
+                }
+                for (c in (_cols - n).coerceAtLeast(_curCol) until _cols) {
+                    if (c in line.cells.indices) line.cells[c] = TermCell()
+                }
+            }
+            'X' -> {
+                val n = (parts.firstOrNull()?.takeIf { it > 0 } ?: 1)
+                val line = safeScreenLine(_curRow)
+                for (c in _curCol until (_curCol + n).coerceAtMost(_cols)) {
+                    if (c in line.cells.indices) line.cells[c] = TermCell()
+                }
+            }
+            '@' -> {
+                val n = (parts.firstOrNull()?.takeIf { it > 0 } ?: 1).coerceAtMost(_cols - _curCol)
+                val line = safeScreenLine(_curRow)
+                for (c in (_cols - 1) downTo (_curCol + n)) {
+                    line.cells[c] = line.cells.getOrNull(c - n) ?: TermCell()
+                }
+                for (c in _curCol until (_curCol + n).coerceAtMost(_cols)) {
+                    if (c in line.cells.indices) line.cells[c] = TermCell()
                 }
             }
             'J' -> {
@@ -290,6 +380,15 @@ class TerminalBuffer(
                         }
                         _curRow = 0
                         _curCol = 0
+                    }
+                    1 -> {
+                        for (r in 0 until _curRow) {
+                            if (r in screen.indices) screen[r] = TerminalLine(_cols)
+                        }
+                        val line = safeScreenLine(_curRow)
+                        for (c in 0.._curCol.coerceAtMost(_cols - 1)) {
+                            if (c in line.cells.indices) line.cells[c] = TermCell()
+                        }
                     }
                     0 -> {
                         val line = safeScreenLine(_curRow)
@@ -337,12 +436,30 @@ class TerminalBuffer(
         }
     }
 
+    private fun xterm256ToColor(index: Int, palette: WabiSabiPalette): Color {
+        val idx = index.coerceIn(0, 255)
+        if (idx < 16) {
+            return palette.ansiColors.getOrNull(idx) ?: palette.foreground
+        }
+        if (idx in 16..231) {
+            val cube = idx - 16
+            val rStep = cube / 36
+            val gStep = (cube % 36) / 6
+            val bStep = cube % 6
+            val levels = intArrayOf(0, 95, 135, 175, 215, 255)
+            return Color(levels[rStep], levels[gStep], levels[bStep])
+        }
+        val gray = (8 + (idx - 232) * 10).coerceIn(0, 255)
+        return Color(gray, gray, gray)
+    }
+
     private fun handleSgr(codes: List<Int>, palette: WabiSabiPalette) {
         if (codes.isEmpty()) {
             currentFg = null
             currentBg = null
             currentBold = false
             currentUnderline = false
+            currentInverse = false
             return
         }
         var i = 0
@@ -353,11 +470,14 @@ class TerminalBuffer(
                     currentBg = null
                     currentBold = false
                     currentUnderline = false
+                    currentInverse = false
                 }
                 1 -> currentBold = true
                 4 -> currentUnderline = true
+                7 -> currentInverse = true
                 22 -> currentBold = false
                 24 -> currentUnderline = false
+                27 -> currentInverse = false
                 in 30..37 -> currentFg = palette.ansiColors.getOrNull(code - 30)
                 39 -> currentFg = null
                 in 40..47 -> currentBg = palette.ansiColors.getOrNull(code - 40)
@@ -371,6 +491,9 @@ class TerminalBuffer(
                         val b = codes[i + 4].coerceIn(0, 255)
                         currentFg = Color(r, g, b)
                         i += 4
+                    } else if (i + 2 < codes.size && codes[i + 1] == 5) {
+                        currentFg = xterm256ToColor(codes[i + 2], palette)
+                        i += 2
                     }
                 }
                 48 -> {
@@ -380,6 +503,9 @@ class TerminalBuffer(
                         val b = codes[i + 4].coerceIn(0, 255)
                         currentBg = Color(r, g, b)
                         i += 4
+                    } else if (i + 2 < codes.size && codes[i + 1] == 5) {
+                        currentBg = xterm256ToColor(codes[i + 2], palette)
+                        i += 2
                     }
                 }
             }
@@ -423,7 +549,7 @@ class TerminalBuffer(
                 screen.getOrNull(screenIdx) ?: TerminalLine(_cols)
             }
             val rawCells = Array(_cols) { c -> lineObj.cells.getOrNull(c) ?: TermCell() }
-            if (autoCommandColors) {
+            if (autoCommandColors && !_isAltScreen) {
                 applySemanticColoring(rawCells, palette)
             }
             out.add(rawCells)
@@ -440,7 +566,9 @@ class TerminalBuffer(
             val idx = lower.indexOf(errKw)
             if (idx >= 0) {
                 for (c in idx until (idx + errKw.length).coerceAtMost(cells.size)) {
-                    cells[c] = cells[c].copy(fgColor = Sumi.Kurenai, bold = true)
+                    if (cells[c].fgColor == null) {
+                        cells[c] = cells[c].copy(fgColor = Sumi.Kurenai, bold = true)
+                    }
                 }
             }
         }
@@ -460,7 +588,9 @@ class TerminalBuffer(
                     palette.primaryAccent
                 }
                 for (c in tokenStart until tokenEnd.coerceAtMost(cells.size)) {
-                    cells[c] = cells[c].copy(fgColor = color, bold = true)
+                    if (cells[c].fgColor == null) {
+                        cells[c] = cells[c].copy(fgColor = color, bold = true)
+                    }
                 }
                 for (c in tokenEnd until lineStr.length.coerceAtMost(cells.size)) {
                     if (cells[c].fgColor == null) {
@@ -471,36 +601,40 @@ class TerminalBuffer(
         }
     }
 
-    fun getLineString(row: Int): String = lock.withLock {
-        val lineObj = screen.getOrNull(row) ?: return@withLock ""
+    fun getLineString(absRow: Int): String = lock.withLock {
+        val lineObj = lineAt(absRow)
         String(CharArray(_cols) { c -> lineObj.cells.getOrNull(c)?.char ?: ' ' })
     }
 
     fun selectAll(): TerminalSelection = lock.withLock {
-        var firstRow = 0
-        var lastRow = (_rows - 1).coerceAtLeast(0)
-        var foundNonEmpty = false
+        val total = totalLines
+        if (total <= 0) {
+            return@withLock TerminalSelection(0, 0, 0, (_cols - 1).coerceAtLeast(0))
+        }
 
-        for (r in 0 until _rows) {
-            val line = screen.getOrNull(r) ?: continue
+        var firstRow = 0
+        var foundFirst = false
+        for (r in 0 until total) {
+            val line = lineAt(r)
             if (line.cells.any { it.char != ' ' }) {
                 firstRow = r
-                foundNonEmpty = true
+                foundFirst = true
                 break
             }
         }
 
-        if (!foundNonEmpty) {
+        if (!foundFirst) {
             return@withLock TerminalSelection(
                 startRow = 0,
                 startCol = 0,
-                endRow = (_rows - 1).coerceAtLeast(0),
+                endRow = (total - 1).coerceAtLeast(0),
                 endCol = (_cols - 1).coerceAtLeast(0)
             )
         }
 
-        for (r in (_rows - 1) downTo firstRow) {
-            val line = screen.getOrNull(r) ?: continue
+        var lastRow = (total - 1).coerceAtLeast(firstRow)
+        for (r in (total - 1) downTo firstRow) {
+            val line = lineAt(r)
             if (line.cells.any { it.char != ' ' }) {
                 lastRow = r
                 break
@@ -508,13 +642,11 @@ class TerminalBuffer(
         }
 
         var lastCol = (_cols - 1).coerceAtLeast(0)
-        val lastLineCells = screen.getOrNull(lastRow)?.cells
-        if (lastLineCells != null) {
-            for (c in (lastLineCells.size - 1) downTo 0) {
-                if (lastLineCells[c].char != ' ') {
-                    lastCol = c
-                    break
-                }
+        val lastLineCells = lineAt(lastRow).cells
+        for (c in (lastLineCells.size - 1) downTo 0) {
+            if (lastLineCells[c].char != ' ') {
+                lastCol = c
+                break
             }
         }
 
@@ -530,21 +662,26 @@ class TerminalBuffer(
 
     fun extractSelectedText(selection: TerminalSelection): String = lock.withLock {
         val norm = selection.normalized()
+        val total = totalLines
+        val maxRow = (total - 1).coerceAtLeast(0)
+        val startR = norm.startRow.coerceIn(0, maxRow)
+        val endR = norm.endRow.coerceIn(0, maxRow)
+
         val sb = StringBuilder()
-        val maxRow = (_rows - 1).coerceAtLeast(0)
-        for (r in norm.startRow..norm.endRow.coerceAtMost(maxRow)) {
-            if (r < 0) continue
-            val line = screen.getOrNull(r)?.cells ?: continue
-            val cStart = if (r == norm.startRow) norm.startCol.coerceIn(0, (_cols - 1).coerceAtLeast(0)) else 0
-            val cEnd = if (r == norm.endRow) norm.endCol.coerceIn(0, (_cols - 1).coerceAtLeast(0)) else (_cols - 1).coerceAtLeast(0)
+        for (r in startR..endR) {
+            val lineCells = lineAt(r).cells
+            val maxCol = (lineCells.size - 1).coerceAtLeast(0)
+            val cStart = if (r == norm.startRow) norm.startCol.coerceIn(0, maxCol) else 0
+            val cEnd = if (r == norm.endRow) norm.endCol.coerceIn(0, maxCol) else maxCol
+
             if (cEnd >= cStart) {
                 val chunk = StringBuilder()
                 for (c in cStart..cEnd) {
-                    chunk.append(line.getOrNull(c)?.char ?: ' ')
+                    chunk.append(lineCells.getOrNull(c)?.char ?: ' ')
                 }
                 sb.append(chunk.toString().trimEnd())
             }
-            if (r < norm.endRow) sb.append('\n')
+            if (r < endR) sb.append('\n')
         }
         sb.toString().trimEnd()
     }

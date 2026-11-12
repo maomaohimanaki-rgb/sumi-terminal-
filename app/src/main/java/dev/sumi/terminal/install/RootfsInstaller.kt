@@ -438,6 +438,29 @@ class RootfsInstaller(
         )
         runCatching { Os.chmod(mirrorlist.path, 420) }
 
+        // Mask mkinitcpio to avoid pointless initramfs image generation in PRoot
+        val mkinitcpioBin = File(rootfsDir, "usr/bin/mkinitcpio")
+        if (mkinitcpioBin.exists()) {
+            runCatching { Os.chmod(mkinitcpioBin.path, 420) } // remove exec permission (0644)
+        }
+        val hooksDir = File(etcDir, "pacman.d/hooks").apply { mkdirs() }
+        File(hooksDir, "90-mkinitcpio-install.hook").writeText(
+            """
+            [Trigger]
+            Type = Path
+            Operation = Install
+            Operation = Upgrade
+            Target = usr/lib/modules/*/vmlinuz
+            Target = usr/lib/initcpio/*
+
+            [Action]
+            Description = Masked mkinitcpio hook (PRoot Android environment)
+            When = PostTransaction
+            Exec = /usr/bin/true
+            """.trimIndent() + "\n",
+            Charsets.UTF_8
+        )
+
         val rootHome = File(rootfsDir, "root").apply { mkdirs() }
         runCatching { Os.chmod(rootHome.path, 493) }
         File(rootHome, ".hushlogin").writeText("", Charsets.UTF_8)

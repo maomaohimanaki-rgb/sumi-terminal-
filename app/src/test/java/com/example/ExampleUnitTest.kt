@@ -172,4 +172,43 @@ class ExampleUnitTest {
         }
         assertEquals("cd", nextPromptEmitted.toString())
     }
+
+    @Test
+    fun tuiGlyphClassification_and_blockArtColumnAlignment() {
+        // Basic ASCII (0x20..0x7E) can coalesce; Box Drawing (U+2500..U+257F), Block Elements (U+2580..U+259F),
+        // and TUI symbols (•, ❯, ✻, ▮) must never coalesce and are rendered geometrically in exact cell bounds
+        assertTrue(dev.sumi.terminal.ui.components.TerminalGlyphRenderer.isBasicAscii('A'))
+        assertFalse(dev.sumi.terminal.ui.components.TerminalGlyphRenderer.isBasicAscii('─'))
+        assertFalse(dev.sumi.terminal.ui.components.TerminalGlyphRenderer.isBasicAscii('█'))
+        assertFalse(dev.sumi.terminal.ui.components.TerminalGlyphRenderer.isBasicAscii('✻'))
+
+        for (code in 0x2500..0x259F) {
+            assertTrue(dev.sumi.terminal.ui.components.TerminalGlyphRenderer.isGeometricGlyph(code.toChar()))
+        }
+        for (sym in charArrayOf('•', '❯', '✻', '▮')) {
+            assertTrue(dev.sumi.terminal.ui.components.TerminalGlyphRenderer.isGeometricGlyph(sym))
+        }
+
+        // Shift+Tab direct key and modifier encoding
+        assertEquals("\u001B[Z", KeyEncoder.encode(TermKey.SHIFT_TAB).toString(Charsets.UTF_8))
+        assertEquals("\t", KeyEncoder.encode(TermKey.TAB).toString(Charsets.UTF_8))
+        assertEquals("\u000C", KeyEncoder.encode(TermKey.CTRL_L).toString(Charsets.UTF_8))
+
+        // Verify 24-bit colored block art + CHA cursor horizontal absolute (CSI G) aligns to exact grid columns
+        val buffer = TerminalBuffer(initialRows = 10, initialCols = 60)
+        val bannerLine1 = "\u001B[38;2;215;119;87m ▐▛███▜▌ \u001B[0m\u001B[12GClaude Code v2.1"
+        val bannerLine2 = "\r\n\u001B[38;2;215;119;87m▝▜█████▛▘\u001B[0m\u001B[12GSonnet 4.6 · Arch Linux"
+        val bannerLine3 = "\r\n\u001B[38;2;215;119;87m  ▘▘ ▝▝  \u001B[0m\u001B[12G~/workspace"
+        buffer.appendBytes((bannerLine1 + bannerLine2 + bannerLine3).toByteArray(Charsets.UTF_8), SumiPalettes.Carvao)
+
+        assertEquals(" ▐▛███▜▌   Claude Code v2.1", buffer.getLineString(0).trimEnd())
+        assertEquals("▝▜█████▛▘  Sonnet 4.6 · Arch Linux", buffer.getLineString(1).trimEnd())
+        assertEquals("  ▘▘ ▝▝    ~/workspace", buffer.getLineString(2).trimEnd())
+
+        // Verify 24-bit color (215, 119, 87) is preserved on block art cells and not overwritten by semantic coloring
+        val (snapshot, _) = buffer.snapshotScreen(SumiPalettes.Carvao, autoCommandColors = true)
+        val blockCell = snapshot[0][2] // '▛'
+        assertEquals('▛', blockCell.char)
+        assertEquals(androidx.compose.ui.graphics.Color(215, 119, 87), blockCell.fgColor)
+    }
 }

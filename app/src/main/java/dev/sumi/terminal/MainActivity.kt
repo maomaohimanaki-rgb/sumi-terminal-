@@ -34,6 +34,7 @@ import dev.sumi.terminal.ui.editor.ZenEditorScreen
 import dev.sumi.terminal.ui.files.FileManagerScreen
 import dev.sumi.terminal.ui.files.FileManagerViewModel
 import dev.sumi.terminal.ui.setup.SetupScreen
+import dev.sumi.terminal.ui.terminal.AppearancePanel
 import dev.sumi.terminal.ui.terminal.TerminalScreen
 import dev.sumi.terminal.ui.terminal.TerminalViewModel
 import dev.sumi.terminal.ui.theme.Sumi
@@ -45,6 +46,7 @@ import java.io.File
 sealed interface SumiDestination {
     data object Terminal : SumiDestination
     data object Files : SumiDestination
+    data object Appearance : SumiDestination
     data class ZenEditor(val file: File) : SumiDestination
 }
 
@@ -107,6 +109,26 @@ fun SumiRootApp(app: SumiApp) {
                                 onOpenFiles = {
                                     fileManagerViewModel.refresh()
                                     destination = SumiDestination.Files
+                                },
+                                onOpenAppearance = {
+                                    terminalViewModel.setAppearanceVisible(false)
+                                    destination = SumiDestination.Appearance
+                                }
+                            )
+                        }
+                        is SumiDestination.Appearance -> {
+                            AppearancePanel(
+                                settings = settings,
+                                onSelectPalette = terminalViewModel::setPalette,
+                                onSetBackgroundPath = terminalViewModel::setBackgroundPath,
+                                onSetBrightness = terminalViewModel::setBrightness,
+                                onSetFontSize = terminalViewModel::setFontSize,
+                                onSetCursorStyle = terminalViewModel::setCursorStyle,
+                                onSetAutoColors = terminalViewModel::setAutoColors,
+                                onSetKeepScreenOn = terminalViewModel::setKeepScreenOn,
+                                onDismiss = {
+                                    terminalViewModel.setAppearanceVisible(false)
+                                    destination = SumiDestination.Terminal
                                 }
                             )
                         }

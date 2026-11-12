@@ -16,8 +16,8 @@ android {
     applicationId = "com.aistudio.sumiterminal.kxzpqm"
     minSdk = 24
     targetSdk = 33
-    versionCode = 3
-    versionName = "2.1-zen"
+    versionCode = 7
+    versionName = "2.7-zen"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -26,11 +26,10 @@ android {
   // and updating Android apps in AI Studio.
   signingConfigs {
     create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+      storeFile = file("../keystore/sumi-release.jks")
+      storePassword = "sumiTerminal2026SecureKey"
+      keyAlias = "sumi-key"
+      keyPassword = "sumiTerminal2026SecureKey"
     }
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")

@@ -41,6 +41,7 @@ object KeyEncoder {
             TermKey.BACKSPACE -> "\u007F"
             TermKey.DEL -> if (modCode > 1) "\u001B[3;${modCode}~" else "\u001B[3~"
             TermKey.TAB -> if (mods.shift) "\u001B[Z" else "\t"
+            TermKey.SHIFT_TAB -> "\u001B[Z"
             TermKey.ESC -> "\u001B"
             TermKey.UP -> if (modCode > 1) "\u001B[1;${modCode}A" else "\u001B[A"
             TermKey.DOWN -> if (modCode > 1) "\u001B[1;${modCode}B" else "\u001B[B"

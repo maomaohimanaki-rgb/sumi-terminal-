@@ -35,7 +35,8 @@ import dev.sumi.terminal.ui.theme.LocalWabiSabiPalette
 @Composable
 fun TerminalScreen(
     viewModel: TerminalViewModel,
-    onOpenFiles: () -> Unit
+    onOpenFiles: () -> Unit,
+    onOpenAppearance: () -> Unit = { viewModel.setAppearanceVisible(true) }
 ) {
     val context = LocalContext.current
     val palette = LocalWabiSabiPalette.current
@@ -107,7 +108,7 @@ fun TerminalScreen(
             onCloseTab = viewModel::closeTab,
             onNewTab = viewModel::createNewTab,
             onOpenFiles = onOpenFiles,
-            onOpenAppearance = { viewModel.setAppearanceVisible(true) }
+            onOpenAppearance = onOpenAppearance
         )
 
         Box(

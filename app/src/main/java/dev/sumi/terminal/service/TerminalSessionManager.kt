@@ -183,6 +183,32 @@ class TerminalSessionManager(
                 )
                 runCatching { Os.chmod(mirrorlist.path, 420) }
             }
+
+            // Mask mkinitcpio hook and binary to speed up pacman transactions in PRoot
+            val mkinitcpioBin = File(rootfsDir, "usr/bin/mkinitcpio")
+            if (mkinitcpioBin.exists()) {
+                runCatching { Os.chmod(mkinitcpioBin.path, 420) } // remove exec (0644)
+            }
+            val hooksDir = File(etcDir, "pacman.d/hooks").apply { mkdirs() }
+            val hookFile = File(hooksDir, "90-mkinitcpio-install.hook")
+            if (!hookFile.exists()) {
+                hookFile.writeText(
+                    """
+                    [Trigger]
+                    Type = Path
+                    Operation = Install
+                    Operation = Upgrade
+                    Target = usr/lib/modules/*/vmlinuz
+                    Target = usr/lib/initcpio/*
+
+                    [Action]
+                    Description = Masked mkinitcpio hook (PRoot Android environment)
+                    When = PostTransaction
+                    Exec = /usr/bin/true
+                    """.trimIndent() + "\n",
+                    Charsets.UTF_8
+                )
+            }
         }
     }
 

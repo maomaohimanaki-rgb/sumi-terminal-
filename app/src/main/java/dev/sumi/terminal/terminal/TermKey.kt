@@ -3,6 +3,7 @@ package dev.sumi.terminal.terminal
 enum class TermKey(val label: String) {
     ESC("ESC"),
     TAB("TAB"),
+    SHIFT_TAB("⇧TAB"),
     ENTER("⏎"),
     BACKSPACE("⌫"),
     UP("↑"),
